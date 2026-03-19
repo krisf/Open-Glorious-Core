@@ -34,7 +34,7 @@ This installs the app into a private venv under your home directory and adds a l
 
 ```sh
 git clone https://github.com/MechNoxer/Open-Glorious-Core.git
-cd open-glorious-core
+cd Open-Glorious-Core
 ./scripts/install.sh
 ```
 
