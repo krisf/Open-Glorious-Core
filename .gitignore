@@ -11,3 +11,8 @@ dist/
 out/
 tmp_extract_test/
 reverse/
+
+packaging/pkg/
+packaging/src/
+packaging/*.pkg.tar.zst
+packaging/*.tar.gz
