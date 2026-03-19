@@ -7,7 +7,7 @@ url="https://github.com/MechNoxer/Open-Glorious-Core"
 license=("MIT")
 depends=(
   "python"
-  "python-pyside6"
+  "pyside6"
 )
 makedepends=(
   "python-build"
@@ -18,13 +18,15 @@ makedepends=(
 source=("$pkgname-$pkgver.tar.gz::https://github.com/MechNoxer/Open-Glorious-Core/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=("SKIP")
 
+_srcdir_name="Open-Glorious-Core-$pkgver"
+
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$_srcdir_name"
   python -m build --wheel --no-isolation
 }
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$_srcdir_name"
 
   python -m installer --destdir="$pkgdir" dist/*.whl
 
