@@ -1,0 +1,3 @@
+#!/bin/sh
+PROJECT_DIR="/home/mauricedelauw/Documents/Code projects/Gloius app on linux"
+exec "$PROJECT_DIR/.venv/bin/python" "$PROJECT_DIR/run_gmmk_rgb.py" "$@"

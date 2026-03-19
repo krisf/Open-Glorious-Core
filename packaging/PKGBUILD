@@ -1,0 +1,42 @@
+pkgname=gmmk-pro-linux-rgb
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Open-source Linux control app for Glorious peripherals"
+arch=("any")
+url="https://github.com/your-username/gmmk-pro-linux-rgb"
+license=("MIT")
+depends=(
+  "python"
+  "python-pyside6"
+)
+makedepends=(
+  "python-build"
+  "python-installer"
+  "python-setuptools"
+  "python-wheel"
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/your-username/gmmk-pro-linux-rgb/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=("SKIP")
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 99-gmmk-pro-qmk-hid.rules \
+    "$pkgdir/usr/lib/udev/rules.d/99-gmmk-pro-qmk-hid.rules"
+  install -Dm644 packaging/gmmk-rgb.desktop.in \
+    "$pkgdir/usr/share/applications/gmmk-rgb.desktop"
+  sed -i \
+    -e "s|__APP_EXEC__|/usr/bin/gmmk-rgb|g" \
+    -e "s|__ICON_NAME__|gmmk-rgb|g" \
+    "$pkgdir/usr/share/applications/gmmk-rgb.desktop"
+  install -Dm644 src/gmmk_rgb_app/static/assets/glorious-logomark.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/gmmk-rgb.svg"
+}

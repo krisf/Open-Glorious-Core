@@ -1,0 +1,17 @@
+pkgbase = gmmk-pro-linux-rgb
+	pkgdesc = Open-source Linux control app for Glorious peripherals
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/your-username/gmmk-pro-linux-rgb
+	arch = any
+	license = MIT
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-setuptools
+	makedepends = python-wheel
+	depends = python
+	depends = python-pyside6
+	source = gmmk-pro-linux-rgb-0.1.0.tar.gz::https://github.com/your-username/gmmk-pro-linux-rgb/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = gmmk-pro-linux-rgb

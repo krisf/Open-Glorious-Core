@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Open Glorious Core</title>
+    <link rel="icon" href="./assets/glorious-core.ico">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+
+<body>
+    <div class="app-shell">
+        <aside class="device-rail">
+            <div class="brand-block">
+                <div class="brand-mark">
+                    <img src="./assets/glorious-logomark.svg" alt="Glorious logo">
+                </div>
+                <div>
+                    <p class="rail-kicker">Connected</p>
+                    <h1 class="rail-title">Devices</h1>
+                </div>
+            </div>
+
+            <div id="device-list" class="device-list"></div>
+
+            <div class="rail-footer">
+                <button id="refresh-button" class="ghost-rail-button">Refresh Devices</button>
+            </div>
+        </aside>
+
+        <main class="workspace-shell">
+            <header class="workspace-header">
+                <div>
+                    <p class="workspace-kicker">Lighting Studio</p>
+                    <h2 id="current-device-name" class="workspace-title">GMMK PRO</h2>
+                    <p id="status-message" class="workspace-copy">Checking keyboard connection...</p>
+                </div>
+                <div class="header-badges">
+                    <span id="backend-name" class="meta-pill">Detecting...</span>
+                    <span id="status-pill" class="status-pill">Waiting</span>
+                </div>
+            </header>
+
+            <section class="device-stage panel surface-panel">
+                <div class="device-meta" id="device-summary"></div>
+
+                <div class="keyboard-stage">
+                    <img class="keyboard-sidelights" src="./assets/keyboard-sidelights.png"
+                        alt="Keyboard sidelights">
+                    <img class="keyboard-render" src="./assets/keyboard-render.png" alt="GMMK Pro render">
+                </div>
+            </section>
+            <section class="control-stack">
+                <section class="panel control-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <p class="surface-kicker">Core Controls</p>
+                            <h3>Brightness & Speed</h3>
+                        </div>
+                    </div>
+                    <div class="control-list">
+                        <label class="control-row">
+                            <span>Brightness</span>
+                            <div>
+                                <input id="brightness" type="range" min="0" max="100" value="100">
+                                <output id="brightness-value">100</output>
+                            </div>
+                        </label>
+                        <label class="control-row">
+                            <span>Speed</span>
+                            <div>
+                                <input id="speed" type="range" min="0" max="100" value="50">
+                                <output id="speed-value">50</output>
+                            </div>
+                        </label>
+                    </div>
+                </section>
+
+                <section class="panel control-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <p class="surface-kicker">Effects</p>
+                            <h3>Lighting Modes</h3>
+                        </div>
+                    </div>
+                    <div id="effect-grid" class="effect-grid"></div>
+                </section>
+
+                <section id="color-controls-section" class="panel control-panel">
+                    <div class="custom-color-panel">
+                        <div class="custom-color-head">
+                            <p class="surface-kicker">Custom Color</p>
+                            <h3 id="color-panel-title">Picker, Hex & RGB</h3>
+                            <p id="color-support-message" class="color-support-message"></p>
+                        </div>
+                        <div id="color-group-tabs" class="color-group-tabs"></div>
+                        <div id="custom-color-layout" class="custom-color-layout">
+                            <div class="picker-block">
+                                <span>Color Picker</span>
+                                <div id="custom-color-surface" class="color-surface" aria-label="Custom color picker">
+                                    <div id="custom-color-handle" class="color-surface-handle"></div>
+                                </div>
+                            </div>
+                            <label class="custom-field wide-field">
+                                <span>Hue</span>
+                                <input id="custom-color-hue" type="range" min="0" max="360" value="0">
+                            </label>
+                            <label class="custom-field wide-field">
+                                <span>Hex</span>
+                                <input id="custom-color-hex" type="text" value="#FFFFFF" maxlength="7" spellcheck="false">
+                            </label>
+                            <div class="rgb-grid">
+                                <label class="custom-field">
+                                    <span>R</span>
+                                    <input id="custom-color-red" type="number" min="0" max="255" value="255">
+                                </label>
+                                <label class="custom-field">
+                                    <span>G</span>
+                                    <input id="custom-color-green" type="number" min="0" max="255" value="255">
+                                </label>
+                                <label class="custom-field">
+                                    <span>B</span>
+                                    <input id="custom-color-blue" type="number" min="0" max="255" value="255">
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="color-grid" class="color-grid-wrap">
+                        <span>Color presets</span>
+                        <div id="color-grid-buttons" class="color-grid"></div>
+                    </div>
+                </section>
+
+            </section>
+        </main>
+    </div>
+    <script src="./app.js"></script>
+</body>
+
+</html>

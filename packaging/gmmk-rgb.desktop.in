@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Open Glorious Core
+Comment=Open-source Linux control app for Glorious peripherals
+Exec=__APP_EXEC__
+Icon=__ICON_NAME__
+Terminal=false
+Categories=Utility;Settings;
+StartupWMClass=Open Glorious Core

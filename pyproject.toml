@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmmk-pro-linux-rgb"
+version = "0.1.0"
+description = "Open-source Linux control app for Glorious peripherals"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Maurice de Lauw" }
+]
+license = "MIT"
+dependencies = [
+  "PySide6>=6.8,<7",
+]
+keywords = ["gmmk", "glorious", "keyboard", "rgb", "linux"]
+classifiers = [
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Hardware",
+]
+
+[project.scripts]
+gmmk-rgb = "gmmk_rgb_app.app:main"
+
+[project.urls]
+Homepage = "https://github.com/your-username/gmmk-pro-linux-rgb"
+Issues = "https://github.com/your-username/gmmk-pro-linux-rgb/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gmmk_rgb_app = ["static/*", "static/assets/*"]
