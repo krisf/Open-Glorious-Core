@@ -153,7 +153,7 @@ class QmkHidBackend(BaseBackend):
 
 
 class StockGmmkProBackend(BaseBackend):
-    name = "stock-hidraw-gmmk"
+    name = "stock-hidraw-glorious"
     REPORT_ID = 7
     REPORT_LENGTH = 256
     SOLID_EFFECT = 7

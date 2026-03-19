@@ -44,7 +44,7 @@ def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
     return list(grouped.values())
 
 
-class GmmkWebController:
+class OpenGloriousCoreWebController:
     def __init__(self) -> None:
         self.backend = create_backend()
 
@@ -143,10 +143,10 @@ class GmmkWebController:
 
 
 class AppRequestHandler(SimpleHTTPRequestHandler):
-    controller: GmmkWebController
+    controller: OpenGloriousCoreWebController
 
-    def __init__(self, *args, directory: str | None = None, controller: GmmkWebController | None = None, **kwargs) -> None:
-        self.controller = controller or GmmkWebController()
+    def __init__(self, *args, directory: str | None = None, controller: OpenGloriousCoreWebController | None = None, **kwargs) -> None:
+        self.controller = controller or OpenGloriousCoreWebController()
         super().__init__(*args, directory=directory, **kwargs)
 
     def do_GET(self) -> None:
@@ -186,7 +186,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    controller = GmmkWebController()
+    controller = OpenGloriousCoreWebController()
 
     def handler(*args, **kwargs):
         return AppRequestHandler(*args, directory=str(STATIC_DIR), controller=controller, **kwargs)
@@ -194,9 +194,9 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, 0), handler)
     host, port = server.server_address
     url = f"http://{host}:{port}"
-    server_thread = threading.Thread(target=server.serve_forever, name="gmmk-desktop-ui-server", daemon=True)
+    server_thread = threading.Thread(target=server.serve_forever, name="open-glorious-core-ui-server", daemon=True)
 
-    print(f"GMMK Pro desktop app serving UI at {url}")
+    print(f"Open Glorious Core desktop app serving UI at {url}")
     print(f"Edit UI files in: {STATIC_DIR}")
     server_thread.start()
 
@@ -218,7 +218,7 @@ def main() -> None:
         qt_app.exec()
     except KeyboardInterrupt:
         print()
-        print("Shutting down GMMK Pro desktop UI...")
+        print("Shutting down Open Glorious Core desktop UI...")
     finally:
         server.shutdown()
         server.server_close()

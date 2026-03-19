@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gmmk-pro-linux-rgb"
+name = "open-glorious-core"
 version = "0.1.0"
 description = "Open-source Linux control app for Glorious peripherals"
 readme = "README.md"
@@ -15,7 +15,7 @@ license = "MIT"
 dependencies = [
   "PySide6>=6.8,<7",
 ]
-keywords = ["gmmk", "glorious", "keyboard", "rgb", "linux"]
+keywords = ["glorious", "keyboard", "mouse", "peripherals", "linux"]
 classifiers = [
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -27,11 +27,11 @@ classifiers = [
 ]
 
 [project.scripts]
-gmmk-rgb = "gmmk_rgb_app.app:main"
+open-glorious-core = "open_glorious_core.app:main"
 
 [project.urls]
-Homepage = "https://github.com/your-username/gmmk-pro-linux-rgb"
-Issues = "https://github.com/your-username/gmmk-pro-linux-rgb/issues"
+Homepage = "https://github.com/your-username/open-glorious-core"
+Issues = "https://github.com/your-username/open-glorious-core/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -40,4 +40,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-gmmk_rgb_app = ["static/*", "static/assets/*"]
+open_glorious_core = ["static/*", "static/assets/*"]

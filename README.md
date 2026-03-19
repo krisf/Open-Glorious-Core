@@ -33,21 +33,21 @@ There are a few ways to install it depending on how you want to use it.
 This installs the app into a private venv under your home directory and adds a launcher in `~/.local/bin`:
 
 ```sh
-git clone https://github.com/your-username/gmmk-pro-linux-rgb.git
-cd gmmk-pro-linux-rgb
+git clone https://github.com/your-username/open-glorious-core.git
+cd open-glorious-core
 ./scripts/install.sh
 ```
 
 After that, run:
 
 ```sh
-gmmk-rgb
+open-glorious-core
 ```
 
 If `~/.local/bin` is not in your `PATH`, run:
 
 ```sh
-~/.local/bin/gmmk-rgb
+~/.local/bin/open-glorious-core
 ```
 
 ### Arch / pacman / AUR
@@ -74,6 +74,6 @@ If something breaks, please open an issue on GitHub. Bug reports, hardware compa
 
 The frontend is kept simple on purpose. You can edit it directly here:
 
-- `src/gmmk_rgb_app/static/index.html`
-- `src/gmmk_rgb_app/static/styles.css`
-- `src/gmmk_rgb_app/static/app.js`
+- `src/open_glorious_core/static/index.html`
+- `src/open_glorious_core/static/styles.css`
+- `src/open_glorious_core/static/app.js`

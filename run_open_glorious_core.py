@@ -18,7 +18,7 @@ for extra in extra_paths:
 
 os.environ["PYTHONPATH"] = os.pathsep.join(extra_paths)
 
-from gmmk_rgb_app.app import main
+from open_glorious_core.app import main
 
 if __name__ == "__main__":
     main()
