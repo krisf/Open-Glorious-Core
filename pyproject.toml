@@ -30,8 +30,8 @@ classifiers = [
 open-glorious-core = "open_glorious_core.app:main"
 
 [project.urls]
-Homepage = "https://github.com/your-username/open-glorious-core"
-Issues = "https://github.com/your-username/open-glorious-core/issues"
+Homepage = "https://github.com/MechNoxer/Open-Glorious-Core"
+Issues = "https://github.com/MechNoxer/Open-Glorious-Core/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

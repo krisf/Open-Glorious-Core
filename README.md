@@ -33,7 +33,7 @@ There are a few ways to install it depending on how you want to use it.
 This installs the app into a private venv under your home directory and adds a launcher in `~/.local/bin`:
 
 ```sh
-git clone https://github.com/your-username/open-glorious-core.git
+git clone https://github.com/MechNoxer/Open-Glorious-Core.git
 cd open-glorious-core
 ./scripts/install.sh
 ```

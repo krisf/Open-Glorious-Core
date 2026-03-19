@@ -3,7 +3,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Open-source Linux control app for Glorious peripherals"
 arch=("any")
-url="https://github.com/your-username/open-glorious-core"
+url="https://github.com/MechNoxer/Open-Glorious-Core"
 license=("MIT")
 depends=(
   "python"
@@ -15,7 +15,7 @@ makedepends=(
   "python-setuptools"
   "python-wheel"
 )
-source=("$pkgname-$pkgver.tar.gz::https://github.com/your-username/open-glorious-core/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/MechNoxer/Open-Glorious-Core/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=("SKIP")
 
 build() {
