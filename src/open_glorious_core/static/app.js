@@ -649,6 +649,18 @@ function applyVerifyState(verify) {
   toggleHidden(km.verifyBanner, false);
 }
 
+// G16: after EVERY successful matrix write the drawer banner states which
+// profile/layer was written and how the operator resolves a profile drift
+// (the GUI's software counter can drift from the board's real active
+// profile). The SERVER composes the whole sentence
+// (payload.keymap_write_banner); the UI only paints it, and only on the OK
+// path, after fetchKeystate() — which resets the banner to default.
+function paintKeymapWriteBanner(payload) {
+  if (!km.banner || !payload || !payload.keymap_write_banner) return;
+  setText(km.banner, payload.keymap_write_banner);
+  toggleHidden(km.banner, false);
+}
+
 async function postVerifyRemap(slot, expect) {
   try {
     const response = await fetch("/api/verify-remap", {
@@ -1037,6 +1049,7 @@ async function writeKeymapBuffer() {
   keymap.busy = false;
   if (payload.ok) {
     await fetchKeystate();
+    paintKeymapWriteBanner(payload); // G16: after the resettable keystate repaint
     if (verifySlot != null && verifyExpect && verifyExpect.length) {
       await postVerifyRemap(verifySlot, verifyExpect);
     }
@@ -1059,6 +1072,7 @@ async function resetKeymapActiveProfile() {
   keymap.busy = false;
   if (payload.ok) {
     await fetchKeystate();
+    paintKeymapWriteBanner(payload); // G16: the reset names its profile too
   } else {
     renderKeymapMeta();
   }

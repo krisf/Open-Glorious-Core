@@ -84,6 +84,24 @@ def test_banner_element_exists_and_is_painted_from_verify_state() -> None:
     assert ".keymap-verify-banner" in STYLES_CSS
 
 
+def test_bind_first_write_banner_is_painted_after_every_successful_write() -> None:
+    # G16 item 3: after a SUCCESSFUL apply-keymap / reset-keymap the drawer
+    # banner (keymap-banner) must show the server's sentence — which
+    # profile/layer was written + the operator's profile-cycle hint. The UI
+    # only PAINTS payload.keymap_write_banner, and only AFTER fetchKeystate()
+    # (which resets the banner to its default text).
+    painter = APP_JS.split("function paintKeymapWriteBanner", 1)[1].split("\n}\n", 1)[0]
+    assert "payload.keymap_write_banner" in painter
+    assert "setText(km.banner" in painter
+    assert "toggleHidden(km.banner, false)" in painter
+    for name in ("writeKeymapBuffer", "resetKeymapActiveProfile"):
+        region = APP_JS.split(f"async function {name}", 1)[1].split("\n}\n", 1)[0]
+        assert "paintKeymapWriteBanner(payload)" in region, name
+        assert region.index("fetchKeystate()") < region.index(
+            "paintKeymapWriteBanner("
+        ), f"{name}: the paint must survive the keystate repaint"
+
+
 def test_server_is_the_only_judge() -> None:
     # The front end never computes a verdict: no client-side matcher table,
     # no verdict template, no client-side 60 s timer (that timer is
@@ -91,4 +109,7 @@ def test_server_is_the_only_judge() -> None:
     assert "now emits" not in APP_JS
     assert "auto-reverted" not in APP_JS
     assert "press your remapped key once" not in APP_JS
+    # G16: the bind-write banner sentence (profile-cycle hint) is server
+    # text (app.KEYMAP_BIND_WRITE_BANNER) — the client only paints it.
+    assert "FN+CTRL" not in APP_JS
     json.dumps({"slot": 58, "expect": [0x59]})  # payload shape sanity

@@ -22,6 +22,14 @@ never 0xFF) so a factory reset keeps the caps keycap alive. The last-good
 store rides the same flow: apply → pending, keystroke → confirmed revert
 target.
 
+G16 adds the BIND-FIRST wire pin: for BOTH apply-keymap and reset-keymap the
+captured command sequence must be cmd 0x01 (p,l) IMMEDIATELY BEFORE cmd 0x03
+(p,l) — one bind, one matrix, no bare write. The GUI's profile/layer is a
+software counter that drifts whenever the operator cycles profiles with
+FN+CTRL+↑ (the wireless board's mirror is blank — no readback), and a matrix
+write aimed at a stale pair IS the 13:07 NO CHANGE. The drawer banner names
+the exact pair every write targeted (pinned verbatim).
+
 Zero device I/O (conftest guards the real IO boundary; the double is wired at
 that boundary on purpose).
 """
@@ -37,6 +45,7 @@ from open_glorious_core.backend import (
     KEYMAP_CODES_OFFSET,
     KEYMAP_SLOTS,
     KEYMAP_TYPES_OFFSET,
+    BackendError,
     StockGmmkProBackend,
 )
 from open_glorious_core.device import HidDevice
@@ -72,6 +81,27 @@ def _codes_of(report: bytes) -> bytes:
 
 def _types_of(report: bytes) -> bytes:
     return report[KEYMAP_TYPES_OFFSET : KEYMAP_TYPES_OFFSET + KEYMAP_SLOTS]
+
+
+def _cmd_seq(device) -> list[tuple[int, int, int]]:
+    """The wire, in send order: (cmd, profile, layer) per feature report.
+
+    G16: the capture is the judge — apply-keymap and reset-keymap must show
+    cmd 0x01 (p,l) IMMEDIATELY BEFORE cmd 0x03 (p,l), never a bare 0x03.
+    GETs (cmd 0x81) are reads on the exchange path and never sent, so the
+    capture is the write side only.
+    """
+    return [(report[1], report[2], report[3]) for report in device.capture]
+
+
+# G16 plan item 3: the operator-facing drawer sentence, pinned VERBATIM
+# (em dash, ↑, parentheses included) for both write actions.
+BIND_WRITE_BANNER_P1L1 = (
+    "Wrote profile 1 layer 1 — if your key still misbehaves, the board is "
+    "on a different profile: cycle profiles with FN+CTRL+↑ (or press Write "
+    "again; every write now targets this exact profile)."
+)
+BIND_WRITE_BANNER_P2L2 = BIND_WRITE_BANNER_P1L1.replace("profile 1 layer 1", "profile 2 layer 2")
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +158,20 @@ def test_full_gui_flow_remaps_caps_slot_58_and_verifies(
 
     # 5. The wire: exactly ONE full-matrix write, carrying the remap AND
     #    the types that make the firmware honor it.
+    #
+    #    G16: the write is BIND-FIRST — the captured command sequence is
+    #    cmd 0x01 (1,1) IMMEDIATELY BEFORE cmd 0x03 (1,1) (the proven
+    #    recovery recipe; a matrix write on a drifted profile counter is
+    #    the 13:07 NO CHANGE). One bind, one matrix, nothing else.
+    assert _cmd_seq(device) == [(0x01, 1, 1), (0x03, 1, 1)], (
+        "bind (cmd 0x01) must sit immediately before the matrix (cmd 0x03), "
+        "same profile/layer, exactly one of each"
+    )
+    assert any(
+        "apply-keymap: bind (1,1) -> matrix 120 slots" in line
+        for line in ctrl.app_log
+    ), "one log line per write"
+    assert result["keymap_write_banner"] == BIND_WRITE_BANNER_P1L1
     matrices = device.matrices
     assert len(matrices) == 1
     report = matrices[0]
@@ -189,6 +233,18 @@ def test_reset_to_factory_keeps_caps_alive_via_overlay(
     result = ctrl.run_action("reset-keymap", None)
     assert result["ok"] is True, result["message"]
 
+    # G16: the reset write is bind-first too — cmd 0x01 (1,1) immediately
+    # before cmd 0x03 (1,1), exactly one matrix write, banner naming the
+    # targeted pair.
+    assert _cmd_seq(device) == [(0x01, 1, 1), (0x03, 1, 1)], (
+        "reset-keymap binds before it writes: 0x01 directly before 0x03"
+    )
+    assert any(
+        "reset-keymap: bind (1,1) -> matrix 120 slots" in line
+        for line in ctrl.app_log
+    ), "one log line per write"
+    assert result["keymap_write_banner"] == BIND_WRITE_BANNER_P1L1
+
     matrices = device.matrices
     assert len(matrices) == 1
     report = matrices[-1]
@@ -212,6 +268,68 @@ def test_reset_to_factory_keeps_caps_alive_via_overlay(
     assert slots[58]["code_name"] == "Caps Lock (0x39)"
     assert slots[58]["code_type_label"] == "normal"
     assert slots[58]["type_name"] == "normal" and slots[58]["cell_active"] is True
+
+
+def test_bind_first_targets_the_drifted_software_counter_pair(
+    fake_hid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G16: the GUI's profile/layer is a SOFTWARE COUNTER (the wireless
+    board's GET mirror is blank — no readback). When the operator moved the
+    board with FN+CTRL+↑, the counter says (2,2) and the WRITE must target
+    (2,2): bind 0x01 (2,2) then matrix 0x03 (2,2) — the matrix selectors and
+    the banner name the same pair the bind selected. Writing (1,1) under a
+    (2,2) counter is the operator-confirmed 13:07 NO CHANGE."""
+    device = fake_hid
+    ctrl, backend = _build(device, monkeypatch)
+    backend.profile, backend.layer = 2, 2  # the counter's believed active pair
+
+    keystate = ctrl.get_keystate()
+    buffer = [slot["code"] for slot in keystate["keymap"]["slots"]]
+    buffer[58] = 0x54
+    result = ctrl.run_action("apply-keymap", {"codes": buffer})
+    assert result["ok"] is True, result["message"]
+
+    # Bind-first on the drifted pair, and NOTHING aimed at profile 1: a
+    # stale-pair write is exactly the silent NO CHANGE.
+    assert _cmd_seq(device) == [(0x01, 2, 2), (0x03, 2, 2)]
+    matrices = device.matrices
+    assert len(matrices) == 1
+    report = matrices[0]
+    assert report[2] == 2 and report[3] == 2, "matrix selectors follow the bind"
+    assert _codes_of(report)[58] == 0x54
+    # G15: the types overlay still rides the SAME matrix.
+    assert _types_of(report)[58] == 0x01
+    # The banner names the pair the write targeted.
+    assert result["keymap_write_banner"] == BIND_WRITE_BANNER_P2L2
+    assert any(
+        "apply-keymap: bind (2,2) -> matrix 120 slots" in line
+        for line in ctrl.app_log
+    )
+
+
+def test_bind_first_survives_an_unverified_bind(
+    fake_hid, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bind rides the recovery-recipe tolerance (G8): a bind the blank
+    mirror cannot confirm is LOGGED, never fatal — the cmd 0x03 write still
+    goes out, exactly once, immediately after."""
+    device = fake_hid
+    ctrl, backend = _build(device, monkeypatch)
+
+    def unverified_bind(profile: int, layer: int) -> str:
+        backend.profile, backend.layer = 1, 1  # mirror never confirms (2,2)
+        raise BackendError("ChangeProfile verification FAILED (blank mirror)")
+
+    monkeypatch.setattr(backend, "change_profile", unverified_bind)
+    keystate = ctrl.get_keystate()
+    buffer = [slot["code"] for slot in keystate["keymap"]["slots"]]
+    buffer[58] = 0x54
+    backend.profile, backend.layer = 2, 2
+    result = ctrl.run_action("apply-keymap", {"codes": buffer})
+    assert result["ok"] is True, result["message"]
+    assert _cmd_seq(device) == [(0x03, 2, 2)], "bind sent nothing; write went out once"
+    assert any("bind unverified" in line for line in ctrl.app_log)
+    assert result["keymap_write_banner"] == BIND_WRITE_BANNER_P2L2
 
 
 def test_verify_arm_feeds_the_same_wired_stack(

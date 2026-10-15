@@ -131,6 +131,19 @@ KEYMAP_BLANK_MIRROR_MESSAGE = (
     "board post-factory-reset); showing packaged factory defaults. Writes "
     "still land and physical key test is the only verification."
 )
+# G16 (plan item 3): after EVERY successful apply-keymap/reset-keymap the
+# drawer banner states which profile/layer was written and how the operator
+# resolves a profile drift himself. The GUI's profile/layer is a software
+# counter (the GET mirror is blank on this wireless board — no readback), so
+# FN+CTRL+↑ / re-pair / sleep can move the real active profile out from under
+# it, and a matrix write aimed at a stale pair is indistinguishable from no
+# write at all (the 13:07 NO CHANGE, G16_BIND_FIRST_PLAN.md). Exact operator-
+# facing sentence — E2E-pinned verbatim.
+KEYMAP_BIND_WRITE_BANNER = (
+    "Wrote profile {profile} layer {layer} — if your key still misbehaves, "
+    "the board is on a different profile: cycle profiles with FN+CTRL+↑ "
+    "(or press Write again; every write now targets this exact profile)."
+)
 
 # --- G12: automated remap verification + self-healing revert -----------------
 # Physics constraint (G12_AUTOVERIFY_PLAN.md): a remap's effect is observable
@@ -658,6 +671,40 @@ class OpenGloriousCoreWebController:
 
         self._backend_io(_revert)
 
+    def _bind_first_matrix_write(
+        self, label: str, profile: int, layer: int, write
+    ) -> str:
+        """G16: bind the target profile/layer (cmd 0x01) IMMEDIATELY BEFORE
+        one matrix write (cmd 0x03) — mirrors the proven recovery recipe
+        (``_auto_revert_write`` / the G11 recovery, remap/KEYMAP_MAP.md
+        EMPIRICAL-FIRMWARE note: cmd 0x01 (p,l) then cmd 0x03, both times
+        the board physically answered).
+
+        The GUI's profile/layer is a software counter (the wireless board's
+        GET mirror is blank — no readback), so FN+CTRL+↑, a re-pair or a
+        sleep drift the real active profile away from it, and a matrix write
+        aimed at a stale pair is indistinguishable from NO write — the
+        operator-confirmed 13:07 NO CHANGE. Binding first makes every GUI
+        write land on exactly the profile the banner names.
+
+        The bind is safe/reversible: it only selects the write target and
+        visibly switches the board's active profile, which the operator can
+        do with FN+CTRL+↑ anyway. A blank mirror can never confirm a bind
+        (G8), so a failed bind verification is logged and the healing write
+        proceeds: one bind + exactly ONE cmd 0x03, no blind retries.
+        """
+        self._log_line(
+            f"{label}: bind ({profile},{layer}) -> matrix {KEYMAP_SLOTS} slots"
+        )
+        try:
+            self.backend.change_profile(profile, layer)  # cmd 0x01
+        except BackendError as exc:
+            self._log_line(
+                f"{label}: profile {profile} layer {layer} bind unverified "
+                f"({exc}) — continuing with the matrix write"
+            )
+        return write()  # exactly one cmd 0x03 KeyMatrix
+
     def verify_view(self) -> dict[str, Any]:
         """Snapshot of the verify-armed state for the UI (and tests)."""
         with self._verify_lock:
@@ -986,6 +1033,7 @@ class OpenGloriousCoreWebController:
                 self.backend.close()
 
     def run_action(self, action: str, value: Any = None) -> dict[str, Any]:
+        bind_write_banner: str | None = None
         try:
             if action == "refresh":
                 return self.get_state()
@@ -1049,22 +1097,41 @@ class OpenGloriousCoreWebController:
                     if default_types is not None
                     else None
                 )
+                # G16: bind (cmd 0x01) immediately before the matrix write
+                # (cmd 0x03) — a profile-drifted GUI counter otherwise sends
+                # the matrix to a profile the operator is not typing on (the
+                # 13:07 NO CHANGE). One lock: bind+write are atomic.
                 message = self._backend_io(
-                    self.backend.set_keymap_codes,
+                    self._bind_first_matrix_write,
+                    "apply-keymap",
                     profile,
                     layer,
-                    raw_bytes,
-                    effective_types,
+                    lambda: self.backend.set_keymap_codes(
+                        profile, layer, raw_bytes, effective_types
+                    ),
                 )
                 # G12 item 1: persist every applied matrix as last-good
                 # insurance. Runs OUTSIDE the io lock's backend call; the
                 # applied codes ride in `pending` and only become the
                 # revertable state on an operator-confirmed press (item 4).
                 self._record_last_good_apply(profile, layer, bytes(raw))
+                bind_write_banner = KEYMAP_BIND_WRITE_BANNER.format(
+                    profile=profile, layer=layer
+                )
             elif action == "reset-keymap":
                 profile = int(getattr(self.backend, "profile", 1))
                 layer = int(getattr(self.backend, "layer", 1))
-                message = self._backend_io(self.backend.reset_keymap, profile, layer)
+                # G16: same bind-first rule for the factory-reset write.
+                message = self._backend_io(
+                    self._bind_first_matrix_write,
+                    "reset-keymap",
+                    profile,
+                    layer,
+                    lambda: self.backend.reset_keymap(profile, layer),
+                )
+                bind_write_banner = KEYMAP_BIND_WRITE_BANNER.format(
+                    profile=profile, layer=layer
+                )
             elif action == "switch-profile":
                 if not isinstance(value, dict):
                     return {"ok": False, "message": "Profile payload must be an object with profile and layer."}
@@ -1083,6 +1150,10 @@ class OpenGloriousCoreWebController:
 
         state = self.get_state()
         state["message"] = message
+        if bind_write_banner is not None:
+            # G16 item 3: the drawer banner names the exact profile/layer the
+            # bind-first write targeted (the UI only paints this sentence).
+            state["keymap_write_banner"] = bind_write_banner
         return state
 
 
