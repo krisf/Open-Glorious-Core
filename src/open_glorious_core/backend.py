@@ -396,7 +396,7 @@ class StockGmmkProBackend(BaseBackend):
             if not uevent.exists() or not descriptor.exists():
                 continue
             metadata = uevent.read_text(encoding='utf-8', errors='ignore')
-            if '0000320F' not in metadata or '00005044' not in metadata:
+            if '0000320F' not in metadata or not any(pid in metadata for pid in ('00005044', '00005092')):
                 continue
             data = descriptor.read_bytes()
             if data.startswith(bytes.fromhex('06 01 ff 09 01 a1 01 85 07')):

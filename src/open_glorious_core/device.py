@@ -7,6 +7,7 @@ from pathlib import Path
 
 GLORIOUS_VENDOR_ID = "320f"
 GMMK_PRO_PRODUCT_ID = "5044"
+SUPPORTED_PRODUCT_IDS = {"5044", "5092"}
 
 
 @dataclass(slots=True)
@@ -45,7 +46,7 @@ def detect_gmmk_pro() -> list[HidDevice]:
 
         hid_id = data.get("HID_ID", "")
         hid_name = data.get("HID_NAME", "")
-        if not hid_id or "GMMK PRO" not in hid_name.upper():
+        if not hid_id or "GMMK" not in hid_name.upper().replace("-", " "):
             continue
 
         parts = hid_id.split(":")
@@ -55,7 +56,7 @@ def detect_gmmk_pro() -> list[HidDevice]:
         _, vendor_id, product_id = parts
         vendor_id = vendor_id[-4:].lower()
         product_id = product_id[-4:].lower()
-        if vendor_id != GLORIOUS_VENDOR_ID or product_id != GMMK_PRO_PRODUCT_ID:
+        if vendor_id != GLORIOUS_VENDOR_ID or product_id not in SUPPORTED_PRODUCT_IDS:
             continue
 
         physical_id, interface_id = _parse_interface_identifiers(uevent_path)
