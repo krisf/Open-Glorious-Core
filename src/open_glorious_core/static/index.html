@@ -132,6 +132,62 @@
                     </div>
                 </section>
 
+                <section id="keymap-panel" class="panel control-panel keymap-panel">
+                    <div class="panel-heading keymap-head">
+                        <div>
+                            <p class="surface-kicker">Remapping</p>
+                            <h3>Key Remapping</h3>
+                        </div>
+                        <div class="keymap-head-actions">
+                            <span id="keymap-dirty-counter" class="keymap-dirty-counter">0 unsaved changes</span>
+                            <button id="keymap-refresh" class="button button-secondary">Reload from device</button>
+                        </div>
+                    </div>
+                    <p id="keymap-banner" class="keymap-banner is-hidden">Device buffer not initialized — showing
+                        factory default</p>
+                    <div id="keymap-profile-grid" class="keymap-profile-grid"></div>
+                    <div class="keymap-body">
+                        <div class="keymap-grid-wrap">
+                            <div id="keymap-grid" class="keymap-grid"></div>
+                            <p class="keymap-legend">Slots 14, 72 and 92 carry no keycap on this board (firmware
+                                matrix artifacts, remap/KEYMAP_MAP.md) and are not editable. Columns 16–20 of the
+                                120-slot matrix are firmware spares and are not shown.</p>
+                        </div>
+                        <aside id="keymap-editor" class="keymap-editor is-hidden">
+                            <div class="keymap-editor-head">
+                                <p class="surface-kicker">Editing keycap</p>
+                                <h4 id="keymap-editor-title">—</h4>
+                            </div>
+                            <dl class="keymap-editor-facts">
+                                <div><dt>Current</dt>
+                                    <dd id="keymap-editor-current">—</dd>
+                                </div>
+                                <div><dt>Factory</dt>
+                                    <dd id="keymap-editor-factory">—</dd>
+                                </div>
+                                <div><dt>Type</dt>
+                                    <dd id="keymap-editor-type">—</dd>
+                                </div>
+                            </dl>
+                            <label class="keymap-editor-select">
+                                <span>Remap to</span>
+                                <input id="keymap-search" type="text" placeholder="Search keys…" autocomplete="off"
+                                    spellcheck="false">
+                                <select id="keymap-code-select" size="10"></select>
+                            </label>
+                            <div class="keymap-editor-actions">
+                                <button id="keymap-revert-key" class="button button-secondary">Revert this key</button>
+                                <button id="keymap-unassign-key" class="button button-secondary">Unassign</button>
+                            </div>
+                            <div class="keymap-editor-commit">
+                                <button id="keymap-write" class="button" disabled>Write 0 key(s) to keyboard</button>
+                                <button id="keymap-reset-all" class="button button-secondary">Reset active profile to
+                                    factory</button>
+                            </div>
+                        </aside>
+                    </div>
+                </section>
+
             </section>
         </main>
     </div>

@@ -333,7 +333,7 @@ async function fetchState() {
   applyPayload(payload);
 }
 
-async function sendAction(action, value = null) {
+async function postAction(action, value = null) {
   const response = await fetch("/api/action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -341,6 +341,11 @@ async function sendAction(action, value = null) {
   });
   const payload = await response.json();
   applyPayload(payload);
+  return payload;
+}
+
+async function sendAction(action, value = null) {
+  await postAction(action, value);
 }
 
 function applyPayload(payload) {
@@ -468,7 +473,328 @@ if (els.flashButton) {
   els.flashButton.addEventListener("click", () => sendAction("device_indication"));
 }
 
+// ---------------------------------------------------------------------------
+// Key remapping panel (G7). Talks to GET /api/keystate and the apply-keymap /
+// reset-keymap / switch-profile actions. The matrix is 6 rows x 20 slots;
+// columns 16-20 are firmware spares (never rendered) and slots 14/72/92 carry
+// no keycap on this board (remap/KEYMAP_MAP.md), so the grid is 6 x 15.
+// ---------------------------------------------------------------------------
+
+const KEYMAP_ROWS = 6;
+const KEYMAP_COLS = 15;
+const KEYMAP_ROW_SLOTS = 20;
+const KEYMAP_SLOT_COUNT = 120;
+const KEYMAP_NO_KEYCAP = new Set([14, 72, 92]);
+const KEYMAP_GROUP_ORDER = [
+  "alpha", "numeric", "punct", "fkeys", "modifiers", "nav",
+  "media", "keypad", "editing", "system", "intl", "vendor", "other",
+];
+
+const keymap = {
+  payload: null, // latest /api/keystate payload (catalog + slots + can_switch)
+  baseline: null, // codes as read from the device (120)
+  buffer: null, // editable copy (120)
+  selectedSlot: null,
+  busy: false,
+};
+
+const km = {
+  banner: document.getElementById("keymap-banner"),
+  dirtyCounter: document.getElementById("keymap-dirty-counter"),
+  refresh: document.getElementById("keymap-refresh"),
+  profileGrid: document.getElementById("keymap-profile-grid"),
+  grid: document.getElementById("keymap-grid"),
+  editor: document.getElementById("keymap-editor"),
+  editorTitle: document.getElementById("keymap-editor-title"),
+  editorCurrent: document.getElementById("keymap-editor-current"),
+  editorFactory: document.getElementById("keymap-editor-factory"),
+  editorType: document.getElementById("keymap-editor-type"),
+  search: document.getElementById("keymap-search"),
+  codeSelect: document.getElementById("keymap-code-select"),
+  revertKey: document.getElementById("keymap-revert-key"),
+  unassignKey: document.getElementById("keymap-unassign-key"),
+  writeButton: document.getElementById("keymap-write"),
+  resetAll: document.getElementById("keymap-reset-all"),
+};
+
+const KEYMAP_BANNER_TEXT = km.banner ? km.banner.textContent.trim() : "";
+
+function keymapCodes() {
+  return (keymap.payload && keymap.payload.codes) || [];
+}
+
+function keymapCodeName(code) {
+  const entry = keymapCodes().find((item) => item.code === code);
+  if (entry) return entry.name;
+  return `0x${String(code).toString(16).toUpperCase().padStart(2, "0")}`;
+}
+
+function keymapCodeShort(code) {
+  if (code === 0xFF) return "—";
+  return keymapCodeName(code).replace(/ \(0x[0-9A-Fa-f]{2}\)$/, "");
+}
+
+function keymapData() {
+  return (keymap.payload && keymap.payload.keymap) || null;
+}
+
+function keymapSlotMeta(slot) {
+  const data = keymapData();
+  if (!data) return null;
+  return data.slots.find((item) => item.slot === slot) || null;
+}
+
+function keymapDirtyCount() {
+  if (!keymap.buffer || !keymap.baseline) return 0;
+  let count = 0;
+  for (let slot = 0; slot < KEYMAP_SLOT_COUNT; slot += 1) {
+    if (keymap.buffer[slot] !== keymap.baseline[slot]) count += 1;
+  }
+  return count;
+}
+
+function keymapIsEditable() {
+  return Boolean(keymap.buffer) && !keymap.busy;
+}
+
+async function fetchKeystate() {
+  try {
+    const response = await fetch("/api/keystate");
+    applyKeystate(await response.json());
+  } catch (error) {
+    showKeymapProblem(`Failed to load keymap state: ${error}`);
+  }
+}
+
+function showKeymapProblem(message) {
+  setText(km.banner, message);
+  toggleHidden(km.banner, false);
+  renderKeymapMeta();
+  renderKeymapProfiles();
+  renderKeymapGrid();
+  renderKeymapEditor();
+}
+
+function applyKeystate(payload) {
+  keymap.payload = payload;
+  const data = keymapData();
+  if (!data) {
+    showKeymapProblem(payload.message || "Keymap unavailable.");
+    return;
+  }
+  if (km.banner) km.banner.textContent = KEYMAP_BANNER_TEXT;
+  toggleHidden(km.banner, !data.is_dirty_source);
+  keymap.baseline = data.slots.map((slot) => slot.code);
+  keymap.buffer = keymap.baseline.slice();
+  keymap.selectedSlot = null;
+  keymap.busy = false;
+  renderKeymapMeta();
+  renderKeymapProfiles();
+  renderKeymapGrid();
+  renderKeymapEditor();
+}
+
+function renderKeymapMeta() {
+  const count = keymapDirtyCount();
+  if (keymap.busy) {
+    setText(km.dirtyCounter, "Writing to keyboard…");
+    setText(km.writeButton, "Writing…");
+    if (km.writeButton) km.writeButton.disabled = true;
+    return;
+  }
+  setText(km.dirtyCounter, `${count} unsaved change${count === 1 ? "" : "s"}`);
+  setText(km.writeButton, `Write ${count} key(s) to keyboard`);
+  if (km.writeButton) km.writeButton.disabled = count === 0 || !keymapIsEditable();
+}
+
+function renderKeymapProfiles() {
+  if (!km.profileGrid) return;
+  km.profileGrid.innerHTML = "";
+  const data = keymapData();
+  const options = (data && data.can_switch) || [];
+  for (const option of options) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "keymap-profile-card";
+    card.classList.toggle("is-active", Boolean(option.active));
+    card.disabled = !option.active && !keymapIsEditable();
+    card.title = option.active ? "Active profile/layer" : `${option.hint || "switch-profile first"}: the device mirror only exposes the active profile`;
+    card.innerHTML = `
+      <strong>Profile ${option.profile}</strong>
+      <span>Layer ${option.layer}</span>
+      ${option.active ? '<em class="keymap-active-tag">active</em>' : ""}
+    `;
+    card.addEventListener("click", () => switchKeymapProfile(option.profile, option.layer));
+    km.profileGrid.appendChild(card);
+  }
+}
+
+function renderKeymapGrid() {
+  if (!km.grid) return;
+  km.grid.innerHTML = "";
+  for (let row = 0; row < KEYMAP_ROWS; row += 1) {
+    for (let column = 0; column < KEYMAP_COLS; column += 1) {
+      const slot = row * KEYMAP_ROW_SLOTS + column;
+      if (KEYMAP_NO_KEYCAP.has(slot)) {
+        const hole = document.createElement("span");
+        hole.className = "keycap keycap-no-keycap";
+        hole.title = `Slot ${slot}: no keycap (firmware matrix artifact, remap/KEYMAP_MAP.md)`;
+        km.grid.appendChild(hole);
+        continue;
+      }
+      const meta = keymapSlotMeta(slot);
+      const code = keymap.buffer ? keymap.buffer[slot] : (meta ? meta.code : 0xFF);
+      const dirty = Boolean(keymap.buffer && keymap.baseline
+        && keymap.buffer[slot] !== keymap.baseline[slot]);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "keycap";
+      button.classList.toggle("is-dirty", dirty);
+      button.classList.toggle("is-selected", keymap.selectedSlot === slot);
+      button.dataset.slot = String(slot);
+      const label = (meta && meta.physical) || `#${slot}`;
+      button.innerHTML = `
+        <span class="keycap-label">${label}</span>
+        <span class="keycap-code">${keymapCodeShort(code)}</span>
+      `;
+      button.title = `Slot ${slot} · ${keymapCodeName(code)}`
+        + (meta ? ` · ${meta.code_type_label}` : "")
+        + (dirty ? " · unsaved change" : "");
+      button.addEventListener("click", () => selectKeymapSlot(slot));
+      km.grid.appendChild(button);
+    }
+  }
+}
+
+function renderKeymapCodeOptions() {
+  if (!km.codeSelect) return;
+  const query = (km.search && km.search.value ? km.search.value : "").trim().toLowerCase();
+  km.codeSelect.innerHTML = "";
+  const byGroup = new Map();
+  for (const entry of keymapCodes()) {
+    if (!byGroup.has(entry.group)) byGroup.set(entry.group, []);
+    byGroup.get(entry.group).push(entry);
+  }
+  const groups = KEYMAP_GROUP_ORDER.filter((group) => byGroup.has(group));
+  for (const group of groups) {
+    const groupEl = document.createElement("optgroup");
+    groupEl.label = group;
+    for (const entry of byGroup.get(group)) {
+      const option = document.createElement("option");
+      option.value = String(entry.code);
+      option.textContent = entry.name;
+      option.hidden = Boolean(query) && !entry.name.toLowerCase().includes(query);
+      groupEl.appendChild(option);
+    }
+    groupEl.disabled = groups.length > 0 && [...groupEl.options].every((option) => option.hidden);
+    km.codeSelect.appendChild(groupEl);
+  }
+  if (keymap.selectedSlot != null && keymap.buffer) {
+    km.codeSelect.value = String(keymap.buffer[keymap.selectedSlot]);
+  }
+}
+
+function renderKeymapEditor() {
+  const slot = keymap.selectedSlot;
+  if (slot == null || !keymap.buffer || !keymapIsEditable()) {
+    toggleHidden(km.editor, true);
+    return;
+  }
+  toggleHidden(km.editor, false);
+  const meta = keymapSlotMeta(slot);
+  setText(km.editorTitle, `${(meta && meta.physical) || "Keycap"} · slot ${slot}`);
+  setText(km.editorCurrent, keymapCodeName(keymap.buffer[slot]));
+  setText(km.editorFactory, meta ? keymapCodeName(meta.factory_code) : "—");
+  setText(km.editorType, meta ? meta.code_type_label : "—");
+  renderKeymapCodeOptions();
+  if (km.revertKey) km.revertKey.disabled = !meta;
+  if (km.unassignKey) km.unassignKey.disabled = false;
+}
+
+function selectKeymapSlot(slot) {
+  if (!keymapIsEditable()) return;
+  keymap.selectedSlot = keymap.selectedSlot === slot ? null : slot;
+  renderKeymapGrid();
+  renderKeymapEditor();
+}
+
+function setBufferCode(code) {
+  const slot = keymap.selectedSlot;
+  if (slot == null || !keymap.buffer) return;
+  keymap.buffer[slot] = code;
+  renderKeymapGrid();
+  renderKeymapEditor();
+  renderKeymapMeta();
+}
+
+async function writeKeymapBuffer() {
+  const count = keymapDirtyCount();
+  if (!keymapIsEditable() || count === 0) return;
+  keymap.busy = true;
+  renderKeymapMeta();
+  renderKeymapProfiles();
+  renderKeymapEditor();
+  const payload = await postAction("apply-keymap", { codes: keymap.buffer.slice() });
+  keymap.busy = false;
+  if (payload.ok) {
+    await fetchKeystate();
+  } else {
+    renderKeymapMeta();
+  }
+}
+
+async function resetKeymapActiveProfile() {
+  const data = keymapData();
+  if (!data || !keymapIsEditable()) return;
+  const okToWrite = window.confirm(
+    `Reset profile ${data.profile} layer ${data.layer} to the factory default keymap?`
+    + " This writes the full 120-slot matrix to the keyboard.",
+  );
+  if (!okToWrite) return;
+  keymap.busy = true;
+  renderKeymapMeta();
+  const payload = await postAction("reset-keymap", null);
+  keymap.busy = false;
+  if (payload.ok) {
+    await fetchKeystate();
+  } else {
+    renderKeymapMeta();
+  }
+}
+
+async function switchKeymapProfile(profile, layer) {
+  if (!keymapIsEditable()) return;
+  keymap.busy = true;
+  renderKeymapMeta();
+  const payload = await postAction("switch-profile", { profile, layer });
+  keymap.busy = false;
+  if (payload.ok) {
+    await fetchKeystate();
+  } else {
+    renderKeymapMeta();
+  }
+}
+
+if (km.refresh) km.refresh.addEventListener("click", () => fetchKeystate());
+if (km.writeButton) km.writeButton.addEventListener("click", () => writeKeymapBuffer());
+if (km.resetAll) km.resetAll.addEventListener("click", () => resetKeymapActiveProfile());
+if (km.revertKey) {
+  km.revertKey.addEventListener("click", () => {
+    const meta = keymap.selectedSlot == null ? null : keymapSlotMeta(keymap.selectedSlot);
+    if (meta) setBufferCode(meta.factory_code);
+  });
+}
+if (km.unassignKey) km.unassignKey.addEventListener("click", () => setBufferCode(0xFF));
+if (km.codeSelect) {
+  km.codeSelect.addEventListener("change", () => {
+    const code = Number.parseInt(km.codeSelect.value, 10);
+    if (!Number.isNaN(code)) setBufferCode(code);
+  });
+}
+if (km.search) km.search.addEventListener("input", () => renderKeymapCodeOptions());
+
 fetchState().catch((error) => {
   setText(els.statusMessage, `Failed to load state: ${error}`);
   setText(els.statusPill, "Error");
 });
+fetchKeystate();
