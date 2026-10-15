@@ -199,5 +199,25 @@ keycaps — the row widths above confirm no caps fit).
   slots 34/54/74/94, arrows `50/51/4F` at 112/113/114, Fn `0xA0` at 109.
 - Modifiers: `E0/E3/E2` (LCtrl/LWin/LAlt) at 100-102, `E1` LShift at 80,
   `E5` RShift at 91, `E6/E4` (RAlt/RCtrl) at 108/110.
-- 82 labeled slots, none labeled in a slot the dump reports as `0xFF`.
+- 82 labeled slots, none labeled in a slot the dump reports as `0xFF` — per
+  the **vendor dump's own view**; see the EMPIRICAL-FIRMWARE note below, where
+  the slot-58 Caps Lock label is firmware truth overriding the dump.
 - Automated in `tests/test_keymap_layout.py` (fixture provenance + spot checks).
+
+## EMPIRICAL-FIRMWARE note (G11)
+
+The tables above transcribe the vendor `Buttoninfo_Default` factory dump. On
+the operator's GMMK Pro Wireless (`320F:5092`, stock WB5092 firmware) that
+dump carries one confirmed error: **the physical CapsLock cell is slot 58, not
+60** (operator-verified 2026-10-15). Writing the vendor factory vector
+(`0xFF` at 58) physically killed CapsLock; a recovery write of `0x39` to slot
+58 restored it, while writes aimed at the vendor's slot 60 did nothing on the
+board. The vendor table lacks this truth — **trust the firmware, not
+`Buttoninfo_Default`.**
+
+Slot 60 keeps the dump's duplicate `0x39` and has no empirical identity: the
+GUI hides it (non-keycap, like 55–57/59), and it must not be touched without
+an operator-confirmed plan. Before remapping any row-4 head cell from the GUI,
+re-verify the cell's physical identity on the live board first. Slot table of
+record: `src/open_glorious_core/static/keymap-slots.js` (row 4 heads at 58);
+pinned by `tests/test_board_matrix_slots.py` / `tests/test_keymap_slots_js.py`.
