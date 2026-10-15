@@ -18,6 +18,7 @@ from .backend import (
     KEYMAP_SLOT_LABELS,
     KEYMAP_UNASSIGNED,
     BackendError,
+    KeymapEntry,
     create_backend,
 )
 from .device import HidDevice, detect_gmmk_pro
@@ -39,6 +40,16 @@ KEYMAP_LAYERS = (1, 2, 3)
 KEYMAP_SHADOW_BANNER = "Device buffer not initialized — showing factory default"
 # Exact tooltip wording for non-active profile/layer cards.
 KEYMAP_SWITCH_HINT = "switch-profile first"
+# G8 live-device signature (GMMK Pro WB 320F:5092, operator gate 10-15): the
+# GET mirror is fully blank — even right after a bind — so the strict backend
+# read raises with this text. It is the parse-None signature /api/keystate
+# degrades on (factory defaults, ok:true), never a hard panel failure.
+KEYMAP_BLANK_MIRROR_SIGNATURE = "no parsable profile/layer"
+KEYMAP_BLANK_MIRROR_MESSAGE = (
+    "Config mirror is blank (shadow buffer never populates on this wireless "
+    "board post-factory-reset); showing packaged factory defaults. Writes "
+    "still land and physical key test is the only verification."
+)
 
 
 def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
@@ -148,6 +159,12 @@ class OpenGloriousCoreWebController:
         table is NOT displayed: the panel shows the packaged factory defaults
         (``default_keymap_table()``) with ``is_dirty_source`` set, and the UI
         shows KEYMAP_SHADOW_BANNER.
+
+        G8 live-device case: on the WB board the whole GET response is blank
+        (header included), so the strict mirror read raises — the panel then
+        degrades the same way (factory defaults, ``source``
+        "factory-defaults", ok:true, KEYMAP_BLANK_MIRROR_MESSAGE) instead of
+        losing the remapping panel; non-blank failures stay ok:false.
         """
         devices = detect_gmmk_pro()
         grouped_devices = _group_devices(devices)
@@ -170,22 +187,40 @@ class OpenGloriousCoreWebController:
 
         profile = int(getattr(self.backend, "profile", 1))
         layer = int(getattr(self.backend, "layer", 1))
+        shadow_blank_mirror = False
         try:
             entries = self._backend_io(self.backend.read_keymap, profile, layer)
             factory = self.backend.default_keymap_table()
         except BackendError as exc:
-            return {
-                "ok": False,
-                "message": str(exc),
-                "backend": self.backend.name,
-                "devices": grouped_devices,
-                "keymap": None,
-            }
+            # G8: the live WB board's GET mirror is fully blank (parse-None
+            # signature from backend._read_config_mirror), so read_keymap
+            # raises — the panel must DEGRADE, not error: packaged factory
+            # defaults with an honest message, ok stays true. Non-blank
+            # failures (device gone, permission, ...) still surface ok:false.
+            if KEYMAP_BLANK_MIRROR_SIGNATURE not in str(exc):
+                return {
+                    "ok": False,
+                    "message": str(exc),
+                    "backend": self.backend.name,
+                    "devices": grouped_devices,
+                    "keymap": None,
+                }
+            shadow_blank_mirror = True
+            factory = self.backend.default_keymap_table()
+            entries = [
+                KeymapEntry(slot=slot, scancode=byte, label=KEYMAP_SLOT_LABELS.get(slot))
+                for slot, byte in enumerate(factory)
+            ]
 
         codes = [int(entry.scancode) for entry in entries]
-        is_dirty_source = all(code == 0x00 for code in codes)
-        source = "factory-default" if is_dirty_source else "device"
-        if is_dirty_source:
+        is_dirty_source = shadow_blank_mirror or all(code == 0x00 for code in codes)
+        if shadow_blank_mirror:
+            source = "factory-defaults"
+        elif is_dirty_source:
+            source = "factory-default"
+        else:
+            source = "device"
+        if is_dirty_source and not shadow_blank_mirror:
             # Blank shadow buffer: display the packaged factory defaults.
             codes = [int(byte) for byte in factory]
 
@@ -222,7 +257,9 @@ class OpenGloriousCoreWebController:
         ]
 
         message = f"Keymap mirror read for profile {profile} layer {layer}."
-        if is_dirty_source:
+        if shadow_blank_mirror:
+            message = KEYMAP_BLANK_MIRROR_MESSAGE
+        elif is_dirty_source:
             message = (
                 f"{KEYMAP_SHADOW_BANNER} — writes land on the device, the mirror "
                 "cannot confirm them; physical key test is the only confirmation."

@@ -39,6 +39,16 @@ SHADOW_TAIL = (
     "test is the only confirmation."
 )
 BANNER = "Device buffer not initialized — showing factory default"
+# Exact G8 degradation message (plan-pinned, byte-for-byte).
+BLANK_MIRROR_MESSAGE = (
+    "Config mirror is blank (shadow buffer never populates on this wireless "
+    "board post-factory-reset); showing packaged factory defaults. Writes "
+    "still land and physical key test is the only verification."
+)
+# Exact backend text for the fully blank (parse-None) live-device mirror.
+BLANK_MIRROR_BACKEND_ERROR = (
+    "Config mirror read failed: device response carries no parsable profile/layer."
+)
 
 
 class FakeBackend:
@@ -195,6 +205,51 @@ def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.Monke
     assert data["slots"][0]["code_name"] == "Escape (0x29)"
     assert payload["message"].startswith(BANNER)
     assert "physical key test" in payload["message"]
+
+
+def test_keystate_blank_mirror_degrades_to_factory_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """G8: fully blank live-device mirror (parse-None BackendError) must NOT
+    lose the panel — serve packaged factory defaults, ok:true, honest message."""
+    backend = FakeBackend()
+
+    def blank_read_keymap(profile=1, layer=1):
+        backend._note("read_keymap", profile, layer)
+        raise BackendError(BLANK_MIRROR_BACKEND_ERROR)
+
+    ctrl, backend = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(backend, "read_keymap", blank_read_keymap)
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is True
+    data = payload["keymap"]
+    assert data["source"] == "factory-defaults"
+    assert data["is_dirty_source"] is True
+    slots = data["slots"]
+    assert len(slots) == KEYMAP_SLOTS == 120
+    assert slots[0]["slot"] == 0
+    assert slots[0]["code"] == 0x29
+    # Slots are the packaged factory table, never the blank device answer.
+    assert [slot["code"] for slot in slots] == list(FACTORY)
+    assert data["profile"] == 1 and data["layer"] == 1
+    assert payload["message"] == BLANK_MIRROR_MESSAGE
+
+
+def test_keystate_device_gone_still_ok_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """G8 degradation is ONLY for the blank-mirror signature: a non-blank
+    failure (device vanished etc.) keeps the honest ok:false panel error."""
+    backend = FakeBackend()
+
+    def gone_read_keymap(profile=1, layer=1):
+        backend._note("read_keymap", profile, layer)
+        raise BackendError(
+            "Feature report read failed on hidraw-test: [Errno 19] No such device"
+        )
+
+    ctrl, backend = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(backend, "read_keymap", gone_read_keymap)
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is False
+    assert payload["keymap"] is None
+    assert "No such device" in payload["message"]
 
 
 def test_keystate_no_device(monkeypatch: pytest.MonkeyPatch) -> None:
