@@ -44,6 +44,13 @@ KEYMAP_OFFSET = 0x80
 KEYMAP_SLOTS = 120
 KEYMAP_UNASSIGNED = 0xFF
 
+# All-zero codes table = factory-reset SHADOW BUFFER (remap/PROTOCOL_DECODE.md
+# G6 verdict): cmd 0x03 writes physically land, yet the GET mirror stays
+# 0x00 x 120 forever — the board's mirror is push-only and never re-fills
+# after reset. It is NOT a write failure; treat it as "read-back cannot
+# verify", display the packaged factory defaults, and say so honestly.
+KEYMAP_BLANK_TABLE = bytes(KEYMAP_SLOTS)
+
 # cmd 0x03 KeyMatrix payload layout (SendButtonMatrix2Device, PROTOCOL_DECODE.md):
 # per-key type bytes at [8..127], key codes at [128..247], both 120 bytes.
 KEYMAP_TYPES_OFFSET = 0x08
@@ -469,14 +476,21 @@ class StockGmmkProBackend(BaseBackend):
         retried) and the mirror re-read to byte-compare the codes table.
 
         Types are not part of the GET mirror, so only the codes are verifiable
-        read-back; that limitation is stated in the returned message.
+        read-back; that limitation is stated in the returned message. When the
+        mirror is the blank factory-reset shadow buffer the write still landed
+        (PROTOCOL_DECODE.md G6) and the message carries the shadow caveat
+        instead of a verification claim.
         """
         codes_bytes = self._matrix_bytes("Keymap codes", codes)
         types_bytes = (
             self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
         )
         self._read_config_mirror(profile, layer)  # active-slot guard + device presence
-        self._write_keymap_matrix(codes_bytes, types_bytes, profile, layer)
+        shadow = self._write_keymap_matrix(codes_bytes, types_bytes, profile, layer)
+        if shadow:
+            return self._shadow_write_message(
+                f"the full {KEYMAP_SLOTS}-slot key matrix", profile, layer
+            )
         return (
             f"Wrote the full {KEYMAP_SLOTS}-slot key matrix to profile {profile} layer {layer} "
             "(cmd 3 KeyMatrix); read-back verified against the full codes table "
@@ -512,7 +526,11 @@ class StockGmmkProBackend(BaseBackend):
         types_bytes = (
             self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
         )
-        self._write_keymap_matrix(bytes(codes), types_bytes, profile, layer)
+        shadow = self._write_keymap_matrix(bytes(codes), types_bytes, profile, layer)
+        if shadow:
+            return self._shadow_write_message(
+                f"{len(entries)} keymap change(s)", profile, layer
+            )
         return (
             f"Applied {len(entries)} keymap change(s) on profile {profile} layer {layer}; "
             "read-back verified against the full codes table."
@@ -528,9 +546,11 @@ class StockGmmkProBackend(BaseBackend):
         read first so a write to a NON-active profile/layer is refused.
         """
         self._read_config_mirror(profile, layer)  # active-slot guard + device presence
-        self._write_keymap_matrix(
+        shadow = self._write_keymap_matrix(
             self._default_keymap_table(), self._default_types(), profile, layer
         )
+        if shadow:
+            return self._shadow_write_message("the factory default keymap", profile, layer)
         return (
             f"Restored the factory default keymap on profile {profile} layer {layer}; "
             "read-back verified against the full codes table."
@@ -561,6 +581,17 @@ class StockGmmkProBackend(BaseBackend):
     def _default_keymap_table() -> bytes:
         """Factory keymap table shipped inside the package (app never depends
         on remap/ at runtime)."""
+        return StockGmmkProBackend._read_default_data("default_keymap.bin", "factory keymap table")
+
+    @staticmethod
+    def default_keymap_table() -> bytes:
+        """Public packaged factory codes table (120 bytes, 0xFF = unassigned).
+
+        When the device mirror answers with the blank shadow buffer
+        (KEYMAP_BLANK_TABLE — factory-reset state, remap/PROTOCOL_DECODE.md
+        G6 verdict) the GUI displays/exposes THIS packaged default instead,
+        labelled honestly as the factory-default source.
+        """
         return StockGmmkProBackend._read_default_data("default_keymap.bin", "factory keymap table")
 
     @staticmethod
@@ -672,22 +703,44 @@ class StockGmmkProBackend(BaseBackend):
             raise BackendError(f"{name.capitalize()} must be 1-3, got {value!r}.")
         return number
 
-    def _write_keymap_matrix(self, codes: bytes, types: bytes, profile: int, layer: int) -> None:
-        """Send the matrix once, then byte-verify the mirror's codes table."""
+    def _write_keymap_matrix(self, codes: bytes, types: bytes, profile: int, layer: int) -> bool:
+        """Send the matrix once, then byte-verify the mirror's codes table.
+
+        Returns True for the factory-reset SHADOW case (remap/PROTOCOL_DECODE.md
+        G6 verdict): the read-back codes table is the all-zero blank shadow
+        (KEYMAP_BLANK_TABLE). The mirror is push-only and stays blank forever
+        after a factory reset even though cmd 0x03 writes physically land —
+        an empty table is "read-back cannot verify", NOT a mismatch, so it
+        must not raise; callers return the shadow-caveat success message
+        instead. Returns False when the read-back byte-matches the payload.
+        Any other difference is a true mismatch and raises.
+        """
         payload = self._build_key_matrix_report(profile, layer, codes, types)
         self._send_feature_report(payload)
         verified = self._read_config_mirror(profile, layer)
         actual = self._codes_table(verified)
-        if actual != bytes(codes):
-            diffs = [slot for slot in range(KEYMAP_SLOTS) if actual[slot] != codes[slot]]
-            first = diffs[0]
-            raise BackendError(
-                "Keymap write verification FAILED: read-back does not match the payload "
-                f"(first difference at slot {first}: mirror 0x{actual[first]:02X}, "
-                f"payload 0x{codes[first]:02X}; {len(diffs)} of {KEYMAP_SLOTS} slots differ). "
-                "The write is UNCONFIRMED and the device state is unknown — re-read the "
-                "keymap before attempting anything else."
-            )
+        if actual == bytes(codes):
+            return False
+        if actual == KEYMAP_BLANK_TABLE:
+            return True
+        diffs = [slot for slot in range(KEYMAP_SLOTS) if actual[slot] != codes[slot]]
+        first = diffs[0]
+        raise BackendError(
+            "Keymap write verification FAILED: read-back does not match the payload "
+            f"(first difference at slot {first}: mirror 0x{actual[first]:02X}, "
+            f"payload 0x{codes[first]:02X}; {len(diffs)} of {KEYMAP_SLOTS} slots differ). "
+            "The write is UNCONFIRMED and the device state is unknown — re-read the "
+            "keymap before attempting anything else."
+        )
+
+    @staticmethod
+    def _shadow_write_message(action: str, profile: int, layer: int) -> str:
+        """Honest success wording for a write the blank mirror could not verify."""
+        return (
+            f"Wrote {action} to profile {profile} layer {layer} (cmd 3 KeyMatrix); "
+            "device mirror is blank so read-back could not verify — physical key "
+            "test is the only confirmation."
+        )
 
 
     def _effect_supports_color(self, effect: int | None = None) -> bool:
