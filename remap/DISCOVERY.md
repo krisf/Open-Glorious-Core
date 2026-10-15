@@ -191,3 +191,20 @@ IMPLICATIONS: before ANY cmd-1 full-config write, the channel must be serving a
 CONFIGURED slot (mirror = real table, not zeros). Candidate recoveries: full
 power-cycle (off/on via switch/dongle — different event class than sleep-resume),
 or future protocol-level "set current profile". Pending operator gate G3.
+
+## OPERATOR RUN 3 — factory reset + factory-init attempt (2026-10-15 ~06:30 EDT)
+
+1. User performed the OFFICIAL factory reset hotkey (FN+ESC, then F1+F3+F5 held 10 s).
+   All three 320F:5092 interfaces re-enumerated at 06:09:26 EDT (hidraw1/2/3 re-created).
+2. Vendor channel post-reset: response header changed shape — 00 00 00 00 (was 07 03 01 01
+   pre-reset), whole config all-zero, brightness 00 00. Consistent with a VIRGIN
+   never-configured buffer.
+3. G3: DSH added `--factory-init` (commit b5344f2, 20 new tests, 66/66 green independently).
+   Guard: refuse unless ENTIRE table slice is 0x00. Payload: cmd-1 full factory image.
+4. Live run: pre-flight passed (virgin), WRITE gate passed, SET sent exactly once.
+   Post-read FAIL: mirror unchanged (all zeros, hdr 00 00 00 00). No EPIPE, no error.
+5. **H1 write hypothesis REFUTED for the virgin channel state.** Single write, no effect,
+   no retry. Device stayed factory-default; user's typing unaffected.
+6. Working hypothesis for the block: a session/handshake sequence (CORE-on-connect)
+   gates config writes; not among the 29 probed candidates. Requires future discovery
+   (USB capture of CORE traffic or further command-space work) — NOT attempted tonight.

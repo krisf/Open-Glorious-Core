@@ -83,3 +83,12 @@ it for device-free construction.
   without --run/--dry-run, DANGER_SLOTS blocked, factory-byte --revert).
   REMAINING: H1 device smoke (operator-gated single-key remap + revert) — awaiting
   operator/user go.
+
+## G3 gate — FAIL (honest), 2026-10-15
+
+- factory-init tooling accepted: commit b5344f2, 66/66 tests green independently,
+  guard + payload + exact-once send verified by operator code review.
+- Live result: write reached the vendor interface, produced NO state change.
+  H1 refuted for the virgin/post-factory-reset channel state.
+- Feature status: READ path proven; SET/reset paths code-complete but unverified
+  on-device pending write-path handshake discovery. Documented in remap/SMOKE.md.
