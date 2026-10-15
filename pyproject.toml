@@ -40,4 +40,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-open_glorious_core = ["static/*", "static/assets/*"]
+open_glorious_core = ["static/*", "static/assets/*", "data/*.bin"]

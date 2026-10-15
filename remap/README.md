@@ -13,19 +13,28 @@ PLAN.md HARD SAFETY RULE 3. This phase (P0) touched **no device**.
 | --- | --- | --- | --- |
 | `README.md` | P0 | ✅ present | This index. |
 | `probe_cmd_space.py` | P1 | ✅ present (batch-1 ready) | Command-space sweep script (read-only feature-report requests via `_exchange_feature_report` only; refuses device IO without `--run`; pre-flight 129 health check; exact-once sends; ≥0.35 s spacing; dry-run verified). |
-| `probe_results.jsonl` | P1 | ⛔ blocked (0 exchanges) | Contains only the UTC abort record proving the sweep stopped pre-baseline (`stage=init_profile_sync`); no candidate was ever sent. |
-| `probe_0x81_baseline.txt` | P1 | ⛔ not yet captured | Baseline blocked: vendor hidraw node not visible inside the DSH session's `/dev` (see `DISCOVERY.md` root cause). |
-| `probe_<cmd>.txt` | P1 | ⛔ not yet captured | Per-command dumps that differ from the all-zero baseline. |
-| `DISCOVERY.md` | P1 | ✅ present (batch-1 STOP record) | Findings doc: method, exact stop point, 29-vs-26 candidate-count flag for G1, resume runbook. Hypotheses intentionally empty. |
+| `probe_results.jsonl` | P1 | ✅ present (39 records) | 1 UTC abort record (DSH pre-baseline stop) + operator-run capture: 9 baseline + 29 probe exchanges; every response byte-identical (mirror behavior, ZERO side effects). |
+| `probe_0x81_baseline.txt` | P1 | ✅ captured (operator run) | Baseline 129 response hex dump — the 256-byte config mirror (profile/layer 1,1). |
+| `probe_<cmd>.txt` | P1 | ✅ captured (×29) | Per-candidate dumps; all 29 identical to the baseline mirror (no command-specific response found in 0x00-0x1F). |
+| `DISCOVERY.md` | P1 | ✅ present (batch-1 results) | Findings doc: method, stop record, decode of the config mirror (keymap table at 0x80-0xF7), H1/H2 write hypotheses, resume runbook. |
 | `capture_plan.md` | P1 | ⏳ placeholder | Future "capture by comparison" session plan (Windows CORE + USB sniff); never run automatically. |
-| `KEYMAP_MAP.md` | P2 | ⏳ placeholder | GMMK Pro key-index → physical key label table (~82 keys). |
-| `smoke_setkeymap.py` | P2 | ⏳ placeholder | Operator-run single-key smoke + revert script (prints full hex + PASS/FAIL). |
-| `SMOKE.md` | P2 | ⏳ placeholder | Operator-pasted smoke test output. |
+| `KEYMAP_MAP.md` | P2 | ✅ present | All 120 keymap slots → physical key names, derived from the real factory dump; the 3 unconfirmed raw bytes (14/72/92) flagged DANGER. |
+| `default_keymap.bin` | P2 | ✅ present | 120-byte factory keymap table captured from the device (reset source of truth; packaged copy in `src/open_glorious_core/data/default_keymap.bin`, asserted equal by tests). |
+| `../tests/fixtures/mirror_profile11.bin` | P2 | ✅ present | Full 256-byte factory config-mirror fixture (first baseline record verbatim) — keymap tests run against the real dump, no device. |
+| `smoke_setkeymap.py` | P2 | ✅ present (operator-pending) | Single-key smoke + `--revert`, `--run`-gated with `WRITE` confirmation; prints full request/response hex + PASS/FAIL; refuses slots 14/72/92; dry-run verified. |
+| `SMOKE.md` | P2 | ⏳ placeholder | Operator-pasted smoke test output (gate G3). |
 
 **P1 batch-1 note (2026-10-15, 01:03 UTC):** sweep ran 0 device exchanges — the
 vendor hidraw node is invisible inside the DSH session's `/dev` (devtmpfs shadowed
 by sandbox tmpfs; escalation unavailable). Keyboard is untouched and alive. All
 tooling is dry-run-verified; resume via the runbook in `DISCOVERY.md`.
+
+**P2 code note (2026-10-15, 02:00 UTC, DSH):** keymap backend implemented on the
+PROVEN mirror read path (`read_keymap`) + H1 write path (`set_keymap`/`reset_keymap`,
+UNVERIFIED — single builder `_build_keymap_write_payload`, exact-once send, full
+read-back byte-compare, BackendError without claiming partial writes). 46/46 tests
+green against the real dump fixture. `smoke_setkeymap.py` awaits OPERATOR execution
+(gate G3): dry-run payload verified, `--run` + physical confirmation required.
 
 ## Ground rules (from PLAN.md)
 

@@ -28,6 +28,80 @@ class KeyboardState:
     blue: int | None = None
 
 
+# Keymap table location inside the 256-byte config mirror exposed by a GET of
+# feature report 7 (remap/DISCOVERY.md "OPERATOR RUN"): 120 slots, one USB HID
+# usage byte per physical key in row-major order, 0xFF = unassigned slot.
+KEYMAP_OFFSET = 0x80
+KEYMAP_SLOTS = 120
+KEYMAP_UNASSIGNED = 0xFF
+
+# slot -> physical key name for the GMMK Pro 75 % board (full derivation:
+# remap/KEYMAP_MAP.md). Slots 14 / 72 / 92 carry non-FF raw bytes in the factory
+# dump but have no confirmed keycap on this unit and are deliberately unlabeled.
+KEYMAP_SLOT_LABELS: dict[int, str] = {
+    **{0: "Esc"},
+    **{i: f"F{i}" for i in range(1, 13)},
+    13: "PrtSc",
+    20: "Grave",
+    **{i: str((i - 20) % 10) for i in range(21, 31)},
+    31: "Minus",
+    32: "Equal",
+    33: "Backspace",
+    34: "Delete",
+    40: "Tab",
+    **{41 + i: c for i, c in enumerate("QWERTYUIOP")},
+    51: "LBracket",
+    52: "RBracket",
+    53: "Backslash",
+    54: "PageUp",
+    60: "Caps Lock",
+    **{61 + i: c for i, c in enumerate("ASDFGHJKL")},
+    70: "Semicolon",
+    71: "Quote",
+    73: "Enter",
+    74: "PageDown",
+    80: "Left Shift",
+    **{81 + i: c for i, c in enumerate("ZXCVBNM")},
+    88: "Comma",
+    89: "Period",
+    90: "Slash",
+    91: "Right Shift",
+    93: "Up",
+    94: "End",
+    100: "Left Ctrl",
+    101: "Left Win",
+    102: "Left Alt",
+    105: "Space",
+    108: "Right Alt",
+    109: "Fn",
+    110: "Right Ctrl",
+    112: "Left",
+    113: "Down",
+    114: "Right",
+}
+
+
+@dataclass(slots=True)
+class KeymapEntry:
+    """One entry of the stock onboard keymap.
+
+    ``slot`` is the position in the device keymap table (0-119, see
+    remap/KEYMAP_MAP.md); ``scancode`` is the raw keymap byte — the USB HID
+    keyboard usage ID for standard keys, vendor codes for a few specials
+    (e.g. 0xA0 = Fn), 0xFF = unassigned; ``label`` is a UI hint only.
+    """
+
+    slot: int
+    scancode: int
+    label: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.slot, int) or not 0 <= self.slot < KEYMAP_SLOTS:
+            raise BackendError(f"Keymap slot must be 0-{KEYMAP_SLOTS - 1}, got {self.slot!r}.")
+        if not isinstance(self.scancode, int) or not 0 <= self.scancode <= 0xFF:
+            raise BackendError(f"Keymap scancode must be a byte 0x00-0xFF, got {self.scancode!r}.")
+
+
 class BaseBackend:
     COLOR_NAMES = ("red", "yellow", "green", "cyan", "blue", "purple", "white")
     EFFECT_COLOR_GROUPS: dict[int, list[str]] = {}
@@ -294,6 +368,148 @@ class StockGmmkProBackend(BaseBackend):
     def save(self) -> str:
         self._apply_current_state()
         return "Re-sent the current stock RGB state to the keyboard."
+
+    # -- Keymap (Phase 2) ---------------------------------------------------
+    #
+    # Read path is PROVEN (remap/DISCOVERY.md): a GET of feature report 7
+    # mirrors the ACTIVE profile's 256-byte config buffer; the live keymap is
+    # the byte slice 0x80-0xF7. The write path below is H1, an UNVERIFIED
+    # hypothesis: the existing profile-update command (cmd 1) carrying the FULL
+    # config payload persists it — the same cmd the RGB setters use with
+    # mostly-zero payloads. Every byte-level H1 assumption lives in
+    # _build_keymap_write_payload so a fallback (e.g. hypothesis H2, a dedicated
+    # remap command) stays a one-method swap.
+
+    def read_keymap(self, profile: int = 1, layer: int = 1) -> list[KeymapEntry]:
+        """Return all 120 keymap slots of the active profile/layer mirror."""
+        mirror = self._read_config_mirror(profile, layer)
+        table = mirror[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS]
+        return [
+            KeymapEntry(slot=slot, scancode=byte, label=KEYMAP_SLOT_LABELS.get(slot))
+            for slot, byte in enumerate(table)
+        ]
+
+    def set_keymap(self, entries: list[KeymapEntry], profile: int = 1, layer: int = 1) -> str:
+        """Write the given keymap slots onto the current table and persist.
+
+        Builds one cmd-1 full-payload report (H1), sends it exactly once, then
+        re-reads the mirror and byte-compares the whole keymap slice; raises
+        BackendError on any mismatch without claiming what the device kept.
+        """
+        entries = list(entries)
+        if not entries:
+            raise BackendError("set_keymap requires at least one KeymapEntry.")
+        seen: set[int] = set()
+        for entry in entries:
+            if not isinstance(entry, KeymapEntry):
+                raise BackendError(f"Not a KeymapEntry: {entry!r}")
+            if entry.slot in seen:
+                raise BackendError(f"Duplicate keymap slot {entry.slot} in entries.")
+            seen.add(entry.slot)
+        mirror = self._read_config_mirror(profile, layer)
+        table = bytearray(mirror[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS])
+        for entry in entries:
+            table[entry.slot] = entry.scancode
+        self._write_keymap_table(bytes(table), mirror, profile, layer)
+        return (
+            f"Applied {len(entries)} keymap change(s) on profile {profile} layer {layer}; "
+            "read-back verified against the full keymap slice."
+        )
+
+    def reset_keymap(self, profile: int = 1, layer: int = 1) -> str:
+        """Restore the factory keymap captured in data/default_keymap.bin.
+
+        No dedicated reset command was found in P1; "reset" means writing the
+        captured factory table back through the same (H1) write path.
+        """
+        table = self._default_keymap_table()
+        mirror = self._read_config_mirror(profile, layer)
+        self._write_keymap_table(table, mirror, profile, layer)
+        return (
+            f"Restored the factory default keymap on profile {profile} layer {layer}; "
+            "read-back verified against the full keymap slice."
+        )
+
+    @staticmethod
+    def _default_keymap_table() -> bytes:
+        """Factory keymap table shipped inside the package (app never depends
+        on remap/ at runtime)."""
+        path = Path(__file__).resolve().parent / "data" / "default_keymap.bin"
+        try:
+            table = path.read_bytes()
+        except OSError as exc:
+            raise BackendError(f"Shipped factory keymap table is missing or unreadable: {exc}") from exc
+        if len(table) != KEYMAP_SLOTS:
+            raise BackendError(
+                f"Shipped factory keymap must be {KEYMAP_SLOTS} bytes, found {len(table)}."
+            )
+        return table
+
+    def _read_config_mirror(self, profile: int, layer: int) -> bytearray:
+        """GET report 7 (via the proven cmd-129 exchange) -> config mirror."""
+        if not self.hidraw:
+            raise BackendError(self.install_hint())
+        for name, value in (("profile", profile), ("layer", layer)):
+            if not 1 <= int(value) <= 3:
+                raise BackendError(f"{name.capitalize()} must be 1-3, got {value!r}.")
+        request = self._make_request(129)
+        request[2] = profile
+        request[3] = layer
+        response = self._exchange_feature_report(request)
+        parsed = self._parse_profile_layer_response(response)
+        if parsed is None:
+            raise BackendError(
+                "Config mirror read failed: device response carries no parsable profile/layer."
+            )
+        if parsed != (int(profile), int(layer)):
+            raise BackendError(
+                "The config mirror only exposes the ACTIVE profile/layer (currently "
+                f"{parsed[0]} / {parsed[1]}); profile {profile} layer {layer} is not active — "
+                "switch profiles on the device first."
+            )
+        return response
+
+    def _build_keymap_write_payload(
+        self, mirror: bytearray, table: bytes, profile: int, layer: int
+    ) -> bytearray:
+        """H1 write report, the ONLY place the write hypothesis is encoded.
+
+        cmd 1 (profile-update) carrying the full config payload: header
+        [0]=report id, [1]=cmd, [2]=profile, [3]=layer, then mirror bytes
+        0..253 at report bytes 2..255 — the same 2-byte report/mirror shift the
+        proven RGB setters show (write report[8]/[9] brightness == mirror[6]/[7]).
+        The keymap slice sits at report bytes 0x82..0xF9 (mirror 0x80 shifted).
+        """
+        if len(table) != KEYMAP_SLOTS:
+            raise BackendError(f"Keymap table must be {KEYMAP_SLOTS} bytes, got {len(table)}.")
+        report = bytearray(self.REPORT_LENGTH)
+        report[0] = self.REPORT_ID
+        report[1] = 1
+        report[2 : 2 + self.REPORT_LENGTH - 2] = mirror[0 : self.REPORT_LENGTH - 2]
+        report[2] = int(profile)
+        report[3] = int(layer)
+        header = 2
+        report[header + KEYMAP_OFFSET : header + KEYMAP_OFFSET + KEYMAP_SLOTS] = table
+        return report
+
+    def _write_keymap_table(
+        self, table: bytes, mirror: bytearray, profile: int, layer: int
+    ) -> None:
+        payload = self._build_keymap_write_payload(mirror, table, profile, layer)
+        self._send_feature_report(payload)
+        verified = self._read_config_mirror(profile, layer)
+        actual = verified[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS]
+        if bytes(actual) != bytes(table):
+            diffs = [slot for slot in range(KEYMAP_SLOTS) if actual[slot] != table[slot]]
+            first = diffs[0]
+            raise BackendError(
+                "Keymap write verification FAILED: read-back does not match the payload "
+                f"(first difference at slot {first}: mirror 0x{actual[first]:02X}, "
+                f"payload 0x{table[first]:02X}; {len(diffs)} of {KEYMAP_SLOTS} slots differ). "
+                "The write is UNCONFIRMED and the device state is unknown — re-read the "
+                "keymap before attempting anything else."
+            )
+
 
     def _effect_supports_color(self, effect: int | None = None) -> bool:
         active_effect = self.state.effect if effect is None else effect
