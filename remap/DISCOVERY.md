@@ -164,3 +164,30 @@ Per the operator amendment: DSH wrote the tooling, Hermes ran it on the rig wher
 2. H1 micro-write smoke: one harmless key → new scancode, mirror-verified, reverted,
    mirror-verified again. Requires user approval (physical confirmation of the key).
 3. Only if H1 fails: sweep 0x20–0x7E with the same proven-inert probe tooling.
+
+## OPERATOR RUN 2 — H1 smoke preflight blocked by channel reset (2026-10-15 ~03:00 UTC)
+
+Findings (all READ-ONLY; zero writes sent to the device tonight):
+- First smoke attempt REFUSED at pre-flight: mirror reports active profile 3/1 whose
+  config buffer is entirely zeros (bright bytes AND the whole keymap table) — a virgin,
+  never-configured slot. Writing the profile-1 payload there would corrupt slot 3.
+- Poller (1s GET loop, ~4 min, remap/profile_poll.log): user pressed the official
+  wired-guide combo FN+CTRL+Up 2-3x live — the configurator channel did NOT move
+  (hdr stayed 07 03 01 01). Hardware profile cycling (LED picker for typing profile)
+  is DECOUPLED from the feature-report configurator channel on this unit.
+- Selector test: GET(129) with req[2]/[3] ∈ {(1,1),(2,1),(3,1),(0,0)} → responses all
+  identical (07 03 01 01 + zeros): the channel does not honor request selectors; it
+  always reports the firmware's current protocol-configured slot.
+- Report-id prefix: post-P2 _exchange_feature_report returns the 0x07 report id as
+  byte 0 (probe-era captures stored the payload without it). Fixture offsets hold for
+  the payload (post-prefix); P2 code handles this consistently.
+- Root cause of the 1→3 flip found in kernel node timestamps: /dev/hidraw3 re-created
+  22:48:58 EDT 2026-10-14 (wireless sleep/resume re-enumeration, ~5 min before the
+  first smoke). The re-enum reset the configurator channel to its power-on default
+  slot (3, virgin). The user's onboard profile-1 config (white/10% from the earlier
+  RGB session) remains intact in NVRAM — untouched by anything tonight.
+- Device is physically fine throughout (user typing normally).
+IMPLICATIONS: before ANY cmd-1 full-config write, the channel must be serving a
+CONFIGURED slot (mirror = real table, not zeros). Candidate recoveries: full
+power-cycle (off/on via switch/dongle — different event class than sleep-resume),
+or future protocol-level "set current profile". Pending operator gate G3.
