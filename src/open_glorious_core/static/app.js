@@ -863,8 +863,11 @@ function renderKeymapGrid() {
       codeEl.className = "keycap-code";
       codeEl.textContent = keymapCodeShort(code);
       button.append(labelEl, codeEl);
+      // G15: the tooltip shows the EFFECTIVE type the firmware honors
+      // (payload type_name), and flags the empirically-alive cells.
       button.title = `Slot ${slot} · ${keymapCodeName(code)}`
-        + (meta ? ` · ${meta.code_type_label}` : "")
+        + (meta ? ` · ${meta.type_name ?? meta.code_type_label}` : "")
+        + (meta && meta.cell_active ? " · cell active" : "")
         + (dirty ? " · unsaved change" : "");
       button.addEventListener("click", () => selectKeymapSlot(slot));
       km.grid.appendChild(button);

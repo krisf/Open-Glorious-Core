@@ -42,9 +42,55 @@ DATA_DIR = Path(__file__).with_name("data")
 HOST = "127.0.0.1"
 
 # Keymap panel constants. The types table ships as the packaged factory
-# default and is used for UI type LABELS only (never written unless the types
-# file says so — writes send data/default_types.bin).
+# default; G15: writes NEVER send it verbatim — the controller pairs every
+# full-matrix write with EFFECTIVE types (build_effective_types below),
+# because the WB5092 firmware honors the TYPE byte as cell activation:
+# a 0xFF-typed cell ignores its code byte entirely, so an assigned cell with
+# the vendor 0xFF default type is a cell that does nothing (operator proof,
+# G15_TYPES_OVERLAY_PLAN.md: the GUI write codes[58]=0x54 with implicit 0xFF
+# did nothing; the manual recovery write with types[58]=0x01 landed).
 KEYMAP_TYPE_LABELS = {0x01: "normal", 0x02: "modifier", 0x03: "consumer", 0xFF: "unused"}
+KEYMAP_TYPE_NORMAL = 0x01
+KEYMAP_TYPE_MODIFIER = 0x02
+KEYMAP_TYPE_CONSUMER = 0x03
+# Types a write must never overwrite: the normal keys, the vendor modifier
+# set (0x02) and the knob/mute consumer typing (0x03) — G15 fix spec rule 3.
+KEYMAP_TYPES_PROTECTED = frozenset(
+    {KEYMAP_TYPE_NORMAL, KEYMAP_TYPE_MODIFIER, KEYMAP_TYPE_CONSUMER}
+)
+# HID usage range of the modifier codes (Keyboard LeftControl … Right GUI).
+KEYMAP_MODIFIER_CODE_RANGE = (0xE0, 0xE7)
+
+
+def build_effective_types(codes: bytes, default_types: bytes) -> bytes:
+    """G15 fix spec 1: the per-key TYPE bytes that make the firmware activate
+    the cells in ``codes``.
+
+    Start from the packaged vendor defaults (data/default_types.bin), then:
+
+    * slots whose default type is 0x01/0x02/0x03 are NEVER touched — that
+      protects the knob's 0x03 consumer typing and the vendor modifier set;
+    * any slot the vendor leaves 0xFF ("unassigned") whose effective code is
+      non-0xFF becomes 0x01 (normal key) — this is what activates the
+      empirical CapsLock cell 58 and every GUI-assigned spare;
+    * a slot assigned a modifier code (0xE0–0xE7) becomes 0x02, matching the
+      vendor modifier typing;
+    * an unassigned slot (code 0xFF) keeps the vendor type byte.
+
+    Pure function: no IO, no device (headless-testable, E2E-pinned).
+    """
+    effective = bytearray(default_types)
+    for slot, code in enumerate(codes[: len(default_types)]):
+        if default_types[slot] in KEYMAP_TYPES_PROTECTED:
+            continue
+        if code == KEYMAP_UNASSIGNED:
+            continue
+        effective[slot] = (
+            KEYMAP_TYPE_MODIFIER
+            if KEYMAP_MODIFIER_CODE_RANGE[0] <= code <= KEYMAP_MODIFIER_CODE_RANGE[1]
+            else KEYMAP_TYPE_NORMAL
+        )
+    return bytes(effective)
 KEYMAP_PROFILES = (1, 2, 3)
 KEYMAP_LAYERS = (1, 2, 3)
 # Exact banner text the UI must show when the mirror is the blank shadow
@@ -93,7 +139,13 @@ KEYMAP_BLANK_MIRROR_MESSAGE = (
 # and failure is REPAIRED (auto-revert to the last-good matrix). The operator
 # spends one optional keystroke; if they spend none, the app reverts.
 VERIFY_TIMEOUT_SECONDS = 60.0
-VERIFY_ARM_BANNER = "press your remapped key once (60 s)"
+# G15 item 4: the 12:51 timeout was UNFOCUSED input (the operator typed in
+# other windows, nothing reached the app). Operator guidance beat: the exact
+# focus sentence is prepended to the arm banner.
+VERIFY_ARM_BANNER = (
+    "Click this app window, then press the key. "
+    "press your remapped key once (60 s)"
+)
 VERIFY_MATCH_TEMPLATE = "VERIFIED — {key} now emits {name}"
 VERIFY_REVERT_BANNER = "no input seen — auto-reverted to last good config"
 VERIFY_SEED_NO_REVERT_BANNER = (
@@ -589,7 +641,20 @@ class OpenGloriousCoreWebController:
                     f"verify-revert: profile {profile} layer {layer} bind "
                     f"unverified ({exc}) — continuing with the matrix write"
                 )
-            self.backend.set_keymap_codes(profile, layer, bytes(codes))  # cmd 0x03
+            # G15: the same types overlay the apply path writes — the
+            # last-good vector is a GUI-applied codes array, and restoring it
+            # with the vendor 0xFF defaults would re-kill every assigned
+            # 0xFF-type cell (the exact caps cell of the incident).
+            codes_bytes = bytes(codes)
+            default_types = self._default_types()
+            effective_types = (
+                build_effective_types(codes_bytes, default_types)
+                if default_types is not None
+                else None
+            )
+            self.backend.set_keymap_codes(  # cmd 0x03
+                profile, layer, codes_bytes, effective_types
+            )
 
         self._backend_io(_revert)
 
@@ -750,17 +815,27 @@ class OpenGloriousCoreWebController:
         # keycap there is Caps Lock — the exact misreading that hid the G11
         # kill. Source: remap/KEYMAP_MAP.md "EMPIRICAL-FIRMWARE" (G11,
         # operator-verified: physical CapsLock cell = slot 58, code 0x39,
-        # type 0x01). Overlay scope is honest and narrow: it applies ONLY to
-        # the factory-defaults display path (is_dirty_source); a real device
-        # byte (e.g. 0x59 after a remap, or a genuine 0xFF = dead cell) is
-        # displayed as reported. default_keymap.bin is NOT rewritten — this
-        # is a display overlay plus the write overlay in reset_keymap.
+        # type 0x01). Overlay scope is honest and narrow: the CODE overlay
+        # applies ONLY to the factory-defaults display path (is_dirty_source);
+        # a real device byte (e.g. 0x59 after a remap, or a genuine 0xFF =
+        # dead cell) is displayed as reported. default_keymap.bin is NOT
+        # rewritten — this is a display overlay plus the write overlay in
+        # reset_keymap.
         display_codes = list(codes)
-        display_types = types
         if is_dirty_source:
-            display_codes, display_types = apply_empirical_overlay(
+            display_codes, _ = apply_empirical_overlay(
                 bytes(codes), types if types is not None else bytes(KEYMAP_SLOTS)
             )
+        # G15 item 2: the panel reports the EFFECTIVE types — the same
+        # overlay apply-keymap writes — not the raw vendor table. Slot 58
+        # (code 0x39, vendor type 0xFF) shows type "normal", matching what
+        # the firmware will actually honor; type_name + cell_active give the
+        # UI the label and the "cell active" boolean directly.
+        display_types = (
+            build_effective_types(bytes(display_codes), types)
+            if types is not None
+            else None
+        )
         slots = []
         for entry in entries:
             code = display_codes[entry.slot]
@@ -769,13 +844,17 @@ class OpenGloriousCoreWebController:
                 if display_types is not None and entry.slot < len(display_types)
                 else None
             )
+            type_label = KEYMAP_TYPE_LABELS.get(type_byte, "reserved")
             slots.append(
                 {
                     "slot": entry.slot,
                     "code": code,
                     "code_name": code_to_name(code),
                     "code_type": type_byte,
-                    "code_type_label": KEYMAP_TYPE_LABELS.get(type_byte, "reserved"),
+                    "code_type_label": type_label,
+                    # G15 item 2: effective-type surface for the UI.
+                    "type_name": type_label,
+                    "cell_active": type_byte is not None and type_byte != 0xFF,
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
@@ -958,8 +1037,24 @@ class OpenGloriousCoreWebController:
                     }
                 profile = int(getattr(self.backend, "profile", 1))
                 layer = int(getattr(self.backend, "layer", 1))
+                raw_bytes = bytes(raw)
+                # G15: the GUI payload carries CODES only; pairing them with
+                # the packaged vendor types verbatim leaves every assigned
+                # 0xFF-type slot (the empirical caps cell 58 above all)
+                # INACTIVE — the firmware honors the type byte as cell
+                # activation. Send the effective types overlay explicitly.
+                default_types = self._default_types()
+                effective_types = (
+                    build_effective_types(raw_bytes, default_types)
+                    if default_types is not None
+                    else None
+                )
                 message = self._backend_io(
-                    self.backend.set_keymap_codes, profile, layer, bytes(raw)
+                    self.backend.set_keymap_codes,
+                    profile,
+                    layer,
+                    raw_bytes,
+                    effective_types,
                 )
                 # G12 item 1: persist every applied matrix as last-good
                 # insurance. Runs OUTSIDE the io lock's backend call; the

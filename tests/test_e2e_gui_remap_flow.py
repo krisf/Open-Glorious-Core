@@ -1,20 +1,26 @@
-"""G12 item 5 — structural E2E: replay the FULL GUI remap flow against the
-fake HID double, and pin what the wire must carry.
+"""G12 item 5 + G15 — structural E2E: replay the FULL GUI remap flow against
+the fake HID double, and pin what the wire must carry.
 
 The GUI flow (tests/conftest.FakeHIDDevice models the live WB5092 board: the
 GET mirror stays blank, so the panel degrades to factory defaults with the
 banner):
 
   open drawer (GET keystate) → click the Caps Lock cap (slot 58, G11) →
-  set target Keypad 1 (0x59) → Apply (POST apply-keymap) → arm verify →
-  one physical keystroke ("End", the NumLock-OFF variant) → VERIFIED.
+  set target NumpadDivide (0x54, the operator's incident write) →
+  Apply (POST apply-keymap) → arm verify → one physical keystroke
+  ("NumpadDivide") → VERIFIED.
 
-Pins: the captured cmd-0x03 report carries codes[58] == 0x59 (NOT 60 — the
-vendor table's Caps Lock cell, physically dead on this board), the types array
-is the packaged default table VERBATIM (no types drift), and "Reset to
-factory" applies the EMPIRICAL overlay (codes[58]=0x39, types[58]=0x01) so a
-factory reset keeps the caps keycap alive. The last-good store rides the same
-flow: apply → pending, keystroke → confirmed revert target.
+Pins (G15 is the point): the captured cmd-0x03 report carries
+codes[58] == 0x54 (NOT 60 — the vendor table's Caps Lock cell, physically
+dead on this board) RIDING types[58] == 0x01 — the EFFECTIVE types overlay,
+not the packaged vendor table (whose 0xFF at 58 made the operator's write a
+silent no-op: the firmware honors the TYPE byte as cell activation).
+Everything else on the types wire is the packaged table verbatim: the knob
+keeps its 0x03 consumer typing, the modifier set keeps 0x02. "Reset to
+factory" applies the EMPIRICAL overlay (codes[58]=0x39, types[58]=0x01 —
+never 0xFF) so a factory reset keeps the caps keycap alive. The last-good
+store rides the same flow: apply → pending, keystroke → confirmed revert
+target.
 
 Zero device I/O (conftest guards the real IO boundary; the double is wired at
 that boundary on purpose).
@@ -34,7 +40,7 @@ from open_glorious_core.backend import (
     StockGmmkProBackend,
 )
 from open_glorious_core.device import HidDevice
-from open_glorious_core.app import VERIFY_ARM_BANNER
+from open_glorious_core.app import VERIFY_ARM_BANNER, build_effective_types
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "src" / "open_glorious_core" / "data"
@@ -89,6 +95,13 @@ def test_full_gui_flow_remaps_caps_slot_58_and_verifies(
     assert slots[58]["code"] == 0x39
     assert slots[58]["code_name"] == "Caps Lock (0x39)"
     assert slots[58]["code_type_label"] == "normal"
+    # G15 item 2: the panel reports the EFFECTIVE types (type_name +
+    # cell_active), so 0xFF vendor bytes can no longer render the empirically
+    # alive caps cell as an inert "unused" spare.
+    assert slots[58]["type_name"] == "normal"
+    assert slots[58]["cell_active"] is True
+    assert slots[15]["type_name"] == "unused"
+    assert slots[15]["cell_active"] is False
     baseline = [slot["code"] for slot in slots]  # applyKeystate() copies this
 
     # 2. Click the Caps Lock cap. The shipped slot table (keymap-slots.js,
@@ -102,28 +115,44 @@ def test_full_gui_flow_remaps_caps_slot_58_and_verifies(
     }
     assert caps_slots == {58}
 
-    # 3. Pick the target in the editor drawer: Keypad 1 (0x59).
+    # 3. Pick the target in the editor drawer: NumpadDivide (0x54) — the
+    #    operator's exact incident write.
     buffer = list(baseline)
-    buffer[58] = 0x59
+    buffer[58] = 0x54
     assert buffer[60] == 0x39  # the vendor table's Caps Lock cell, untouched
 
     # 4. Apply → POST /api/action apply-keymap (the GUI sends codes only;
-    #    the backend pairs them with the packaged default types).
+    #    the controller pairs them with the EFFECTIVE types overlay — G15).
     result = ctrl.run_action("apply-keymap", {"codes": buffer})
     assert result["ok"] is True, result["message"]
 
-    # 5. The wire: exactly ONE full-matrix write, carrying the remap.
+    # 5. The wire: exactly ONE full-matrix write, carrying the remap AND
+    #    the types that make the firmware honor it.
     matrices = device.matrices
     assert len(matrices) == 1
     report = matrices[0]
     assert report[0] == 0x07 and report[2] == 1 and report[3] == 1  # id, profile, layer
     codes = _codes_of(report)
-    assert codes[58] == 0x59, "caps cell remapped — slot 58, NOT 60 (G11)"
+    types = _types_of(report)
+    assert codes[58] == 0x54, "caps cell remapped — slot 58, NOT 60 (G11)"
     assert codes[60] == 0x39, "the dead slot-60 cell keeps its vendor byte"
-    assert _types_of(report) == DEFAULT_TYPES, (
-        "apply-keymap pairs the packaged default types table verbatim — "
-        "no types drift (slot 58 must not sneak a type byte in)"
-    )
+    # THE G15 PIN: codes[58]=0x54 RIDES types[58]=0x01. The vendor default
+    # (0xFF) makes the cell ignore its code — the root cause #2: the
+    # operator's GUI write did nothing exactly because the types array was
+    # the packaged vendor table.
+    assert types[58] == 0x01, "assigned caps cell activates as a normal key"
+    assert types[58] != 0xFF, "never ship the vendor 0xFF onto an assigned cell"
+    # Rule 3 (protection): the knob consumer typing and the modifier set are
+    # never touched by a normal apply.
+    assert types[14] == 0x03, "knob keeps its consumer typing"
+    for slot in (80, 91, 100, 101, 102, 108, 110):
+        assert types[slot] == 0x02, f"modifier slot {slot} keeps 0x02"
+    # The whole types array is exactly the effective overlay — the packaged
+    # table with slot 58 forced active, no byte drift anywhere else.
+    assert types == build_effective_types(bytes(buffer), DEFAULT_TYPES)
+    expected = bytearray(DEFAULT_TYPES)
+    expected[58] = 0x01
+    assert types == bytes(expected)
 
     # 6. Item 1 + 4: the applied matrix is persisted as PENDING insurance —
     #    it is not the revert target until a keystroke confirms it.
@@ -138,10 +167,10 @@ def test_full_gui_flow_remaps_caps_slot_58_and_verifies(
     assert arm["ok"] is True
     assert arm["message"] == VERIFY_ARM_BANNER
 
-    # 8. ONE physical keystroke. NumLock OFF: the key emits "End".
-    verdict = ctrl.record_key_event("End", "End")
+    # 8. ONE physical keystroke: the remapped caps cell emits NumpadDivide.
+    verdict = ctrl.record_key_event("NumpadDivide", "/")
     assert verdict["recorded"] is True
-    assert verdict["verify"]["banner"] == "VERIFIED — End now emits Keypad 1 (0x59)"
+    assert verdict["verify"]["banner"] == "VERIFIED — / now emits Keypad / (0x54)"
 
     # The confirmed matrix is now the revertable last-good…
     promoted = lastgood.load(1, 1)
@@ -173,10 +202,16 @@ def test_reset_to_factory_keeps_caps_alive_via_overlay(
             assert codes[slot] == FACTORY[slot], slot
             assert types[slot] == DEFAULT_TYPES[slot], slot
 
+    # The knob + modifier typings survive the factory overlay untouched.
+    assert types[14] == 0x03, "knob consumer typing survives factory reset"
+    for slot in (80, 91, 100, 101, 102, 108, 110):
+        assert types[slot] == 0x02, f"modifier slot {slot} survives"
+
     # The drawer keeps telling the truth about the caps cell.
     slots = ctrl.get_keystate()["keymap"]["slots"]
     assert slots[58]["code_name"] == "Caps Lock (0x39)"
     assert slots[58]["code_type_label"] == "normal"
+    assert slots[58]["type_name"] == "normal" and slots[58]["cell_active"] is True
 
 
 def test_verify_arm_feeds_the_same_wired_stack(

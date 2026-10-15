@@ -108,8 +108,18 @@ class FakeBackend:
     def default_keymap_table(self) -> bytes:
         return FACTORY
 
-    def set_keymap_codes(self, profile: int, layer: int, codes: bytes) -> str:
-        self._note("set_keymap_codes", profile, layer, bytes(codes))
+    def set_keymap_codes(
+        self, profile: int, layer: int, codes: bytes, types: bytes | None = None
+    ) -> str:
+        # G15: the controller now pairs every write with an EFFECTIVE types
+        # overlay — record it so the pins can assert the exact bytes.
+        self._note(
+            "set_keymap_codes",
+            profile,
+            layer,
+            bytes(codes),
+            None if types is None else bytes(types),
+        )
         time.sleep(0.001)
         self.codes = list(codes)
         return (
@@ -182,6 +192,16 @@ def test_keystate_normal_device_shape(controller) -> None:
     assert slots[80]["code_type_label"] == "modifier"
     assert slots[15]["code_type_label"] == "unused"
     assert TYPES[80] == 0x02  # ground truth for the assertion above
+    # G15 item 2: the payload reports EFFECTIVE types (what a write will
+    # send / the firmware will honor) plus the UI-facing type_name and the
+    # cell_active boolean. Device codes are the factory table here: every
+    # 0xFF-type slot is unassigned, so the effective table is self-consistent.
+    assert slots[0]["type_name"] == "normal" and slots[0]["cell_active"] is True
+    assert slots[14]["type_name"] == "consumer" and slots[14]["cell_active"] is True
+    assert slots[80]["type_name"] == "modifier" and slots[80]["cell_active"] is True
+    assert slots[58]["code_type_label"] == "unused"  # device byte 0xFF
+    assert slots[58]["type_name"] == "unused"
+    assert slots[58]["cell_active"] is False
 
     switch = data["can_switch"]
     assert len(switch) == 9
@@ -257,6 +277,16 @@ def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.Monke
     assert [slot["code"] for slot in data["slots"]] == list(FACTORY_DISPLAY)
     assert data["slots"][58]["code_name"] == "Caps Lock (0x39)"
     assert data["slots"][58]["code_type_label"] == "normal"
+    # G15 item 2: effective types surface. The factory table is self-
+    # consistent on every vendor byte; slot 58 is the one exception — the
+    # empirical overlay gives it code 0x39, whose effective type is 0x01.
+    assert [slot["code_type"] for slot in data["slots"]] == [
+        0x01 if slot["slot"] == 58 else TYPES[slot["slot"]] for slot in data["slots"]
+    ]
+    assert data["slots"][58]["type_name"] == "normal"
+    assert data["slots"][58]["cell_active"] is True
+    assert data["slots"][15]["type_name"] == "unused"
+    assert data["slots"][15]["cell_active"] is False
     assert data["slots"][0]["code_name"] == "Escape (0x29)"
     assert payload["message"].startswith(BANNER)
     assert "physical key test" in payload["message"]
@@ -370,9 +400,40 @@ def test_apply_keymap_valid_writes_full_table(controller) -> None:
     assert result["ok"] is True
     assert result["message"].startswith("Wrote the full 120-slot key matrix to profile 1 layer 1")
     writes = backend.calls_named("set_keymap_codes")
-    assert writes == [("set_keymap_codes", 1, 1, bytes(new_codes))]
+    # G15: the write carries EXPLICIT effective types, not the implicit
+    # backend default. Slot 0's default type is 0x01 (protected) and every
+    # factory 0xFF-type slot is unassigned here, so this vector's effective
+    # table equals the packaged table — pinning that the overlay is a no-op
+    # on the self-consistent factory vector, never blind byte-drift.
+    assert writes == [("set_keymap_codes", 1, 1, bytes(new_codes), TYPES)]
     # Response is a full state payload (get_state) + the backend message.
     assert result["state"]["brightness"] == 100
+
+
+def test_apply_keymap_effective_types_overlay(controller) -> None:
+    """G15 fix spec 1, on the real controller write path: an assigned cell
+    whose vendor type is 0xFF must go out type 0x01 (the caps→NumpadDivide
+    incident), a modifier assignment 0x02, and the knob's 0x03 / modifier
+    0x02 typings are never touched."""
+    ctrl, backend = controller
+    codes = list(FACTORY)
+    codes[58] = 0x54  # caps cell → NumpadDivide (the operator's write)
+    codes[15] = 0xE0  # spare cell → LCtrl assignment
+    codes[14] = 0x68  # knob cell: REASSIGNED, its 0x03 typing stays sacred
+    assert ctrl.run_action("apply-keymap", {"codes": codes})["ok"] is True
+    types = backend.calls_named("set_keymap_codes")[0][4]
+    assert types[58] == 0x01, "assigned 0xFF-type cell activates as normal key"
+    assert types[15] == 0x02, "modifier-code assignment matches vendor typing"
+    assert types[14] == 0x03, "knob consumer typing protected (rule 3)"
+    for slot in (80, 91, 100, 101, 102, 108, 110):
+        assert types[slot] == 0x02, "the vendor modifier set is untouched"
+    for slot in range(KEYMAP_SLOTS):
+        if FACTORY[slot] == 0xFF and slot not in (15, 58):
+            assert types[slot] == TYPES[slot], f"unassigned slot {slot} untouched"
+    # Un-assigning a cell does not sneak a type byte in.
+    codes[58] = 0xFF
+    ctrl.run_action("apply-keymap", {"codes": codes})
+    assert backend.calls_named("set_keymap_codes")[-1][4][58] == 0xFF
 
 
 def test_apply_keymap_validation(controller) -> None:

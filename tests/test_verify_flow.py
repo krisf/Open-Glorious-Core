@@ -4,7 +4,8 @@ The self-heal contract (G12_AUTOVERIFY_PLAN.md, byte-for-byte banners):
 
 * ``POST /api/verify-remap {slot, expect:[codes…]}`` arms the matcher and a
   server-side timer (default 60 s, injected here); banner
-  "press your remapped key once (60 s)".
+  "Click this app window, then press the key. press your remapped key
+  once (60 s)" (G15 focus guidance prepended on the G12 core sentence).
 * ``POST /api/keyevent {code, key}`` feeds one keydown; the matcher maps the
   EXPECTED HID codes to KeyboardEvent.code variants (0x59 → Numpad1 AND End —
   the NumLock class of the capslock incident). A match:
@@ -43,6 +44,7 @@ from tests.test_controller_keymap import FakeBackend, make_controller
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORY = (ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin").read_bytes()
+TYPES = (ROOT / "src" / "open_glorious_core" / "data" / "default_types.bin").read_bytes()
 
 FAST_TIMEOUT = 0.05
 SLEEP_PAST_TIMEOUT = 0.5
@@ -107,7 +109,10 @@ def test_arm_seeds_banners_and_logs(armed) -> None:
     ctrl, _ = armed
     result = ctrl.arm_verify(58, [0x59])
     assert result["ok"] is True
-    assert result["message"] == "press your remapped key once (60 s)"
+    # G15 item 4: focus guidance prepended (operator beat — the 12:51 timeout
+    # was input into OTHER windows); the G12 core sentence survives verbatim.
+    assert result["message"] == "Click this app window, then press the key. press your remapped key once (60 s)"
+    assert "press your remapped key once (60 s)" in result["message"]
     view = result["verify"]
     assert view["armed"] is True and view["state"] == "armed"
     assert view["slot"] == 58 and view["expect"] == [0x59]
@@ -237,6 +242,12 @@ def test_timeout_on_verified_state_reverts_proven_path(armed) -> None:
         ("set_keymap_codes", 1, 1),
     ]
     assert writes[1][3] == bytes(codes)
+    # G15: the healing write restores with EFFECTIVE types — the last-good
+    # vector has codes[58]=0x59 in a vendor-0xFF cell; restoring with the
+    # vendor table would re-kill the caps cell it exists to heal.
+    expected_types = bytearray(TYPES)
+    expected_types[58] = 0x01
+    assert writes[1][4] == bytes(expected_types)
     assert len(backend.calls_named("set_keymap_codes")) == 1, "exactly one write"
     assert any("auto-reverted" in line for line in view["log"])
 
@@ -271,7 +282,9 @@ def test_revert_reports_failure_honestly(monkeypatch: pytest.MonkeyPatch) -> Non
     ctrl._verify_timeout = FAST_TIMEOUT
     make_verified_pair()
 
-    def exploding_write(profile: int, layer: int, codes: bytes) -> str:
+    def exploding_write(
+        profile: int, layer: int, codes: bytes, types: bytes | None = None
+    ) -> str:
         backend._note("set_keymap_codes", profile, layer, bytes(codes))
         raise BackendError("open failed: device vanished")
 
