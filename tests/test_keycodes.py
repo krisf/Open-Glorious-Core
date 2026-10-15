@@ -8,6 +8,7 @@ per that doc) is the assertion anchor: no byte it contains may ever render as
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from open_glorious_core.keycodes import (
     TARGET_TYPE_BY_CODE,
     VENDOR_CODE_NAMES,
     all_assignable_codes,
+    code_aliases,
     code_group,
     code_to_name,
     target_type,
@@ -34,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FACTORY_TABLE = (
     ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin"
 ).read_bytes()
+_ALIAS_SHAPE = re.compile(r"[a-z0-9]+")
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +174,43 @@ def test_all_assignable_codes_contains_every_named_code() -> None:
     assert set(VENDOR_CODE_NAMES) <= set(codes)
     assert KEYMAP_UNASSIGNED in codes
     assert 0xA1 not in codes  # reserved stays out of the dropdown
+
+
+# ---------------------------------------------------------------------------
+# G9 FIX C search aliases (bounded, domain-derived, normalized)
+# ---------------------------------------------------------------------------
+
+
+def test_alias_codes_are_all_assignable() -> None:
+    assignable = set(all_assignable_codes())
+    assert set(keycodes.CODE_ALIASES) <= assignable
+
+
+def test_aliases_are_bounded_lowercase_alphanumeric() -> None:
+    for code, aliases in keycodes.CODE_ALIASES.items():
+        assert 1 <= len(aliases) <= 10, f"alias budget blown at 0x{code:02X}"
+        assert len(set(aliases)) == len(aliases), f"dupe alias at 0x{code:02X}"
+        for alias in aliases:
+            assert _ALIAS_SHAPE.fullmatch(alias), alias
+            # Plain single digits are NEVER aliased: the digits-row names
+            # "1".."0" already prefix-match those queries (G9 plan).
+            assert not (alias.isdigit() and len(alias) == 1), alias
+
+
+def test_keypad_digits_carry_the_obvious_alias_family() -> None:
+    for digit in range(1, 10):
+        aliases = code_aliases(0x58 + digit)  # 0x59="1" … 0x61="9"
+        for alias in (f"num{digit}", f"numpad{digit}", f"kp{digit}", f"p{digit}"):
+            assert alias in aliases, f"0x{0x58 + digit:02X} missing {alias}"
+    assert {"num0", "numpad0", "kp0", "p0"} <= set(code_aliases(0x62))
+
+
+def test_code_aliases_api_shape() -> None:
+    assert isinstance(code_aliases(0x59), tuple)
+    assert code_aliases(0x59) == ("num1", "numpad1", "kp1", "p1")
+    assert code_aliases(0x04) == ()  # plain letters need no aliases
+    assert "fn" in keycodes.code_to_name(0xA0).split(" ")[0].lower()
+    assert "f1" in keycodes.code_to_name(0x3A).lower()  # f1-style stays
 
 
 # ---------------------------------------------------------------------------

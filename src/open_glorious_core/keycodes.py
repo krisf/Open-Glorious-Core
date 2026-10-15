@@ -261,6 +261,95 @@ _fill_group("modifiers", list(HID_MODIFIER_CODES))
 _fill_group("vendor", list(VENDOR_CODE_NAMES))
 
 
+# Search aliases (G9 FIX C): bounded, domain-derived strings — NOT new usage
+# names (code_to_name stays the naming source of truth). Matching happens on
+# lowercased, non-alphanumeric-stripped tokens (see static/app.js pure search
+# helpers), so every published alias is exactly that: lowercase, alphanumeric.
+# Plain single digits are deliberately NOT aliased anywhere: the digits-row
+# names "1"–"0" already prefix-match those queries.
+# Alias groups (documented, one per code):
+#   navigation  — standard abbreviations (prtsc, ins, pgup, pgdn, del, esc…)
+#   system      — caps / numlock / menu shorthands
+#   keypad      — the obvious short families num*/numpad*/kp*/pad*/p* for the
+#                 ten keypad digits, word forms for the keypad operators
+#   media       — mute / volup / voldown words
+#   modifiers   — lctrl/ctrl, lshift/shift, win/super/meta/gui/cmd family
+#   editing     — return / spacebar / erase-back
+#   vendor      — Fn key words
+#   unassigned  — the 0xFF "clear the key" words
+CODE_ALIASES: dict[int, tuple[str, ...]] = {
+    # navigation
+    0x29: ("esc",),
+    0x46: ("prtsc", "prtscn", "printscreen"),
+    0x47: ("scrlock", "scrolllock"),
+    0x48: ("brk", "pausebreak"),
+    0x49: ("ins",),
+    0x4a: ("homekey",),
+    0x4b: ("pgup", "pageup"),
+    0x4c: ("del", "deleteforward"),
+    0x4d: ("endkey",),
+    0x4e: ("pgdn", "pagedn", "pagedown"),
+    0x4f: ("right", "arrowright", "rightarrow"),
+    0x50: ("left", "arrowleft", "leftarrow"),
+    0x51: ("down", "arrowdown", "downarrow"),
+    0x52: ("up", "arrowup", "uparrow"),
+    # system
+    0x39: ("caps",),
+    0x53: ("numlock",),
+    0x65: ("menu", "appmenu", "contextmenu"),
+    # keypad
+    0x54: ("kpdiv", "numdiv", "paddiv", "kpdivide"),
+    0x55: ("kpmul", "nummul", "padmul", "kpstar", "kpmultiply"),
+    0x56: ("kpminus", "kpmin", "kpsub"),
+    0x57: ("kpplus", "kpadd"),
+    0x58: ("kpenter", "numenter"),
+    0x59: ("num1", "numpad1", "kp1", "p1"),
+    0x5a: ("num2", "numpad2", "kp2", "p2"),
+    0x5b: ("num3", "numpad3", "kp3", "p3"),
+    0x5c: ("num4", "numpad4", "kp4", "p4"),
+    0x5d: ("num5", "numpad5", "kp5", "p5"),
+    0x5e: ("num6", "numpad6", "kp6", "p6"),
+    0x5f: ("num7", "numpad7", "kp7", "p7"),
+    0x60: ("num8", "numpad8", "kp8", "p8"),
+    0x61: ("num9", "numpad9", "kp9", "p9"),
+    0x62: ("num0", "numpad0", "kp0", "p0"),
+    0x63: ("num00", "numpad00", "kp00"),
+    0x67: ("kpequal", "kpequals"),
+    0x85: ("kpcomma",),
+    0x86: ("kpequalsign",),
+    # media
+    0x7f: ("mute", "volumemute", "audiomute"),
+    0x80: ("volup", "volumeup", "louder"),
+    0x81: ("voldown", "volumedown", "volminus"),
+    # modifiers
+    0xe0: ("ctrl", "lctrl", "leftctrl", "control"),
+    0xe1: ("shift", "lshift", "leftshift"),
+    0xe2: ("alt", "lalt", "leftalt", "option"),
+    0xe3: ("win", "lwin", "leftwin", "super", "meta", "gui", "cmd", "command"),
+    0xe4: ("rctrl", "rightctrl"),
+    0xe5: ("rshift", "rightshift"),
+    0xe6: ("ralt", "rightalt", "altgr"),
+    0xe7: ("rwin", "rightwin", "rgui", "rmeta"),
+    # editing
+    0x28: ("return",),
+    0x2a: ("delback", "eraseback"),
+    0x2c: ("spacebar",),
+    # vendor
+    0xa0: ("fnkey", "function"),
+    # unassigned (0xFF)
+    0xff: ("none", "blank", "clear", "erase"),
+}
+
+
+def code_aliases(code: int) -> tuple[str, ...]:
+    """Bounded search aliases for the remap dropdown (G9 FIX C).
+
+    Domain-derived strings only; every published alias is already in
+    normalized form (lowercase, alphanumerics only) so the UI can match with
+    a plain startswith after normalizing the query the same way."""
+    return CODE_ALIASES.get(code, ())
+
+
 def code_to_name(
     code: int,
     *,

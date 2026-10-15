@@ -736,8 +736,7 @@ output {
     font-size: 0.82rem;
 }
 
-.keymap-editor-select input,
-.keymap-editor-select select {
+.keymap-editor-select input {
     padding: 8px 10px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 10px;
@@ -747,13 +746,85 @@ output {
     font-size: 0.86rem;
 }
 
-.keymap-editor-select select {
-    font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+/* G9 FIX C: searchable remap-target list (replaces the old <select>, whose
+   hidden-option filtering rendered empty on open in QtWebEngine). The full
+   grouped catalog shows on an empty query; group headings stick to the top
+   while scrolling. */
+.keymap-code-list {
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.3);
+    /* G9 FIX E: dark themed scrollbar for the suggestion list. */
+    scrollbar-color: rgba(243, 154, 35, 0.45) rgba(255, 255, 255, 0.05);
 }
 
-.keymap-editor-select optgroup {
+.keymap-code-group {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0;
+    padding: 6px 8px 4px;
+    background: #211c17;
     color: var(--accent);
-    background: var(--bg-soft);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.keymap-code-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.keymap-code-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.keymap-code-item.is-cursor {
+    background: rgba(243, 154, 35, 0.16);
+    outline: 1px solid rgba(243, 154, 35, 0.55);
+}
+
+.keymap-code-name {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.keymap-code-hex {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.keymap-code-item.is-current .keymap-code-name {
+    color: var(--accent);
+}
+
+.keymap-code-item.is-current::after {
+    content: "current";
+    margin-left: auto;
+    color: var(--accent);
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.keymap-code-empty {
+    margin: 0;
+    padding: 10px 8px;
+    color: var(--muted);
+    font-size: 0.82rem;
 }
 
 .keymap-editor-actions,

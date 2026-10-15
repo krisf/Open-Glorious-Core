@@ -59,6 +59,56 @@ function clampByte(value) {
   return clamp(Number.parseInt(value, 10) || 0, 0, 255);
 }
 
+// [PURE-SEARCH-START]
+// Pure, DOM-free remap-search logic (G9 FIX C). Extracted verbatim between
+// these markers and unit-tested headlessly by tests/test_keymap_search_js.py
+// (node). Normalization spec: query and every alias/name are lowercased with
+// ALL non-alphanumerics stripped; a match is startswith on a normalized alias
+// OR startswith on the normalized name (the " (0xNN)" code suffix is NOT part
+// of the searchable name); a hex query — "0x59" (1-2 digits) or two bare hex
+// chars like "59"/"a6" — matches the code itself. Single bare digits stay
+// TEXT queries, so "1" prefix-matches the digits-row name "1" (G9 plan:
+// plain single digits are never aliased). Empty query matches every entry —
+// the dropdown opens showing the FULL grouped list, never empty.
+function normalizeKeyToken(value) {
+  return String(value == null ? "" : value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function keyQueryHex(value) {
+  const token = normalizeKeyToken(value);
+  let hex = null;
+  const prefixed = /^0x([0-9a-f]{1,2})$/.exec(token);
+  if (prefixed) {
+    hex = Number.parseInt(prefixed[1], 16);
+  } else if (/^[0-9a-f]{2}$/.test(token)) {
+    // Exactly two bare hex chars ("59", "a6", "ff"): hex. Single chars and
+    // longer strings are text queries.
+    hex = Number.parseInt(token, 16);
+  }
+  return hex;
+}
+
+function keyEntrySearchName(entry) {
+  // Strip the " (0xNN)" code suffix: searchable name stays "F1", not
+  // "f10x3a" (which made query "f10" prefix-match F1).
+  return normalizeKeyToken(String(entry.name == null ? "" : entry.name)
+    .replace(/ \(0x[0-9A-Fa-f]{2}\)$/, ""));
+}
+
+function keyEntryMatches(entry, query) {
+  const token = normalizeKeyToken(query);
+  if (!token) return true;
+  const hex = keyQueryHex(query);
+  if (hex !== null && entry.code === hex) return true;
+  if (keyEntrySearchName(entry).startsWith(token)) return true;
+  const aliases = entry.aliases || [];
+  for (const alias of aliases) {
+    if (normalizeKeyToken(alias).startsWith(token)) return true;
+  }
+  return false;
+}
+// [PURE-SEARCH-END]
+
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 }
@@ -492,9 +542,26 @@ const KEYMAP_SLOT_COUNT = 120;
 // `is_keycap` flag is the source of truth.
 const KEYMAP_NON_KEYCAP = new Set([14, 72, 92, 103, 104, 106, 107, 111]);
 const KEYMAP_GROUP_ORDER = [
-  "alpha", "numeric", "punct", "fkeys", "modifiers", "nav",
-  "media", "keypad", "editing", "system", "intl", "vendor", "other",
+  "alpha", "numeric", "fkeys", "modifiers", "nav",
+  "keypad", "media", "punct", "editing", "system", "intl", "vendor", "other",
 ];
+// G9 FIX C: human headings for the dropdown group headings (empty query
+// shows the FULL grouped list under these).
+const KEYMAP_GROUP_LABELS = {
+  alpha: "Letters",
+  numeric: "Digits row",
+  fkeys: "F-keys",
+  modifiers: "Modifiers",
+  nav: "Navigation",
+  keypad: "Numpad",
+  media: "Media",
+  punct: "Punctuation",
+  editing: "Editing",
+  system: "System",
+  intl: "International",
+  vendor: "Vendor specials",
+  other: "Other",
+};
 
 const keymap = {
   payload: null, // latest /api/keystate payload (catalog + slots + can_switch)
@@ -502,6 +569,8 @@ const keymap = {
   buffer: null, // editable copy (120)
   selectedSlot: null,
   busy: false,
+  codeMatches: [], // catalog entries the search query currently shows
+  codeCursor: 0, // keyboard selection index into codeMatches
 };
 
 const km = {
@@ -516,7 +585,7 @@ const km = {
   editorFactory: document.getElementById("keymap-editor-factory"),
   editorType: document.getElementById("keymap-editor-type"),
   search: document.getElementById("keymap-search"),
-  codeSelect: document.getElementById("keymap-code-select"),
+  codeList: document.getElementById("keymap-code-list"),
   revertKey: document.getElementById("keymap-revert-key"),
   unassignKey: document.getElementById("keymap-unassign-key"),
   writeButton: document.getElementById("keymap-write"),
@@ -686,32 +755,77 @@ function renderKeymapGrid() {
   }
 }
 
-function renderKeymapCodeOptions() {
-  if (!km.codeSelect) return;
-  const query = (km.search && km.search.value ? km.search.value : "").trim().toLowerCase();
-  km.codeSelect.innerHTML = "";
+function renderKeymapCodeList() {
+  if (!km.codeList) return;
+  const query = km.search && km.search.value ? km.search.value : "";
+  const entries = keymapCodes().filter((entry) => keyEntryMatches(entry, query));
+  keymap.codeMatches = entries;
+  keymap.codeCursor = clamp(keymap.codeCursor, 0, Math.max(entries.length - 1, 0));
+  km.codeList.innerHTML = "";
+  if (!entries.length) {
+    const empty = document.createElement("p");
+    empty.className = "keymap-code-empty";
+    empty.textContent = `No remap target matches “${query.trim()}”.`;
+    km.codeList.appendChild(empty);
+    return;
+  }
   const byGroup = new Map();
-  for (const entry of keymapCodes()) {
+  for (const entry of entries) {
     if (!byGroup.has(entry.group)) byGroup.set(entry.group, []);
     byGroup.get(entry.group).push(entry);
   }
-  const groups = KEYMAP_GROUP_ORDER.filter((group) => byGroup.has(group));
-  for (const group of groups) {
-    const groupEl = document.createElement("optgroup");
-    groupEl.label = group;
+  const current = keymap.selectedSlot != null && keymap.buffer
+    ? keymap.buffer[keymap.selectedSlot] : null;
+  let index = 0;
+  let cursorEl = null;
+  for (const group of KEYMAP_GROUP_ORDER.filter((name) => byGroup.has(name))) {
+    const heading = document.createElement("p");
+    heading.className = "keymap-code-group";
+    heading.textContent = KEYMAP_GROUP_LABELS[group] || group;
+    km.codeList.appendChild(heading);
     for (const entry of byGroup.get(group)) {
-      const option = document.createElement("option");
-      option.value = String(entry.code);
-      option.textContent = entry.name;
-      option.hidden = Boolean(query) && !entry.name.toLowerCase().includes(query);
-      groupEl.appendChild(option);
+      const item = document.createElement("div");
+      item.className = "keymap-code-item";
+      item.setAttribute("role", "option");
+      item.dataset.code = String(entry.code);
+      item.dataset.index = String(index);
+      const isCurrent = entry.code === current;
+      item.classList.toggle("is-current", isCurrent);
+      item.setAttribute("aria-selected", isCurrent ? "true" : "false");
+      if (index === keymap.codeCursor) {
+        item.classList.add("is-cursor");
+        cursorEl = item;
+      }
+      const nameEl = document.createElement("span");
+      nameEl.className = "keymap-code-name";
+      nameEl.textContent = entry.name.replace(/ \(0x[0-9A-Fa-f]{2}\)$/, "");
+      const hexEl = document.createElement("span");
+      hexEl.className = "keymap-code-hex";
+      hexEl.textContent = `0x${String(entry.code).toString(16).toUpperCase().padStart(2, "0")}`;
+      item.append(nameEl, hexEl);
+      item.title = entry.aliases && entry.aliases.length
+        ? `${entry.name} — search: ${entry.aliases.join(", ")}`
+        : entry.name;
+      km.codeList.appendChild(item);
+      index += 1;
     }
-    groupEl.disabled = groups.length > 0 && [...groupEl.options].every((option) => option.hidden);
-    km.codeSelect.appendChild(groupEl);
   }
-  if (keymap.selectedSlot != null && keymap.buffer) {
-    km.codeSelect.value = String(keymap.buffer[keymap.selectedSlot]);
-  }
+  if (cursorEl) cursorEl.scrollIntoView({ block: "nearest" });
+}
+
+function moveKeymapCursor(delta) {
+  const count = keymap.codeMatches.length;
+  if (!count) return;
+  keymap.codeCursor = clamp(keymap.codeCursor + delta, 0, count - 1);
+  renderKeymapCodeList();
+}
+
+// Stage an assignment: dirty dot + "N unsaved changes" + write button all
+// update immediately through setBufferCode (nothing is written to the device
+// until the operator presses the write button).
+function stageKeymapCode(code) {
+  if (!Number.isInteger(code)) return;
+  setBufferCode(code);
 }
 
 function renderKeymapEditor() {
@@ -726,7 +840,7 @@ function renderKeymapEditor() {
   setText(km.editorCurrent, keymapCodeName(keymap.buffer[slot]));
   setText(km.editorFactory, meta ? keymapCodeName(meta.factory_code) : "—");
   setText(km.editorType, meta ? meta.code_type_label : "—");
-  renderKeymapCodeOptions();
+  renderKeymapCodeList();
   if (km.revertKey) km.revertKey.disabled = !meta;
   if (km.unassignKey) km.unassignKey.disabled = false;
 }
@@ -734,6 +848,7 @@ function renderKeymapEditor() {
 function selectKeymapSlot(slot) {
   if (!keymapIsEditable()) return;
   keymap.selectedSlot = keymap.selectedSlot === slot ? null : slot;
+  keymap.codeCursor = 0;
   renderKeymapGrid();
   renderKeymapEditor();
 }
@@ -805,13 +920,51 @@ if (km.revertKey) {
   });
 }
 if (km.unassignKey) km.unassignKey.addEventListener("click", () => setBufferCode(0xFF));
-if (km.codeSelect) {
-  km.codeSelect.addEventListener("change", () => {
-    const code = Number.parseInt(km.codeSelect.value, 10);
-    if (!Number.isNaN(code)) setBufferCode(code);
+if (km.search) {
+  km.search.addEventListener("input", () => {
+    keymap.codeCursor = 0;
+    renderKeymapCodeList();
+  });
+  // G9 FIX C: the search input KEEPS FOCUS while ArrowDown/ArrowUp move the
+  // list selection (typing is never interrupted); Enter stages the selected
+  // target immediately.
+  km.search.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveKeymapCursor(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveKeymapCursor(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const entry = keymap.codeMatches[keymap.codeCursor];
+      if (entry) stageKeymapCode(entry.code);
+    }
   });
 }
-if (km.search) km.search.addEventListener("input", () => renderKeymapCodeOptions());
+if (km.codeList) {
+  // Click/tap a result to stage it; focus returns to the search box so the
+  // operator can keep refining the query. mousedown (not click) +
+  // preventDefault keeps the caret in the input the whole time.
+  km.codeList.addEventListener("mousedown", (event) => {
+    const item = event.target.closest(".keymap-code-item");
+    if (!item) return;
+    event.preventDefault();
+    const code = Number.parseInt(item.dataset.code, 10);
+    if (!Number.isNaN(code)) stageKeymapCode(code);
+    if (km.search) km.search.focus();
+  });
+  km.codeList.addEventListener("mousemove", (event) => {
+    const item = event.target.closest(".keymap-code-item");
+    if (!item) return;
+    const index = Number.parseInt(item.dataset.index, 10);
+    if (Number.isNaN(index) || index === keymap.codeCursor) return;
+    keymap.codeCursor = index;
+    const current = km.codeList.querySelector(".keymap-code-item.is-cursor");
+    if (current) current.classList.remove("is-cursor");
+    item.classList.add("is-cursor");
+  });
+}
 
 fetchState().catch((error) => {
   setText(els.statusMessage, `Failed to load state: ${error}`);

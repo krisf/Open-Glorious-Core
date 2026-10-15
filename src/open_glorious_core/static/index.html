@@ -172,9 +172,10 @@
                             </dl>
                             <label class="keymap-editor-select">
                                 <span>Remap to</span>
-                                <input id="keymap-search" type="text" placeholder="Search keys…" autocomplete="off"
-                                    spellcheck="false">
-                                <select id="keymap-code-select" size="10"></select>
+                                <input id="keymap-search" type="text" placeholder="Search keys, aliases, 0x59…"
+                                    autocomplete="off" spellcheck="false">
+                                <div id="keymap-code-list" class="keymap-code-list" role="listbox"
+                                    aria-label="Remap targets"></div>
                             </label>
                             <div class="keymap-editor-actions">
                                 <button id="keymap-revert-key" class="button button-secondary">Revert this key</button>

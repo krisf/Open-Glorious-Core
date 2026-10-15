@@ -189,8 +189,19 @@ def test_keystate_normal_device_shape(controller) -> None:
     catalog = payload["codes"]
     assert catalog, "code catalog must ship for the UI dropdown"
     letter_a = next(entry for entry in catalog if entry["code"] == 0x04)
-    assert letter_a == {"code": 0x04, "name": "A (0x04)", "group": "alpha", "target_type": 0x01}
+    assert letter_a == {
+        "code": 0x04,
+        "name": "A (0x04)",
+        "group": "alpha",
+        "target_type": 0x01,
+        "aliases": [],
+    }
     assert any(entry["code"] == 0xFF for entry in catalog)
+    # G9 FIX C: the searchable catalog ships its bounded aliases per entry
+    # (keypad digit 1: the num/numpad/kp/p family; nothing aliases a bare "1").
+    keypad_1 = next(entry for entry in catalog if entry["code"] == 0x59)
+    assert keypad_1["aliases"] == ["num1", "numpad1", "kp1", "p1"]
+    assert all("1" not in entry["aliases"] for entry in catalog)
 
 
 def test_keystate_slots_carry_is_keycap_flag(controller) -> None:

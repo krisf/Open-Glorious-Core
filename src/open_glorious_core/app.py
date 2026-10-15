@@ -22,7 +22,13 @@ from .backend import (
     create_backend,
 )
 from .device import HidDevice, detect_gmmk_pro
-from .keycodes import all_assignable_codes, code_group, code_to_name, target_type
+from .keycodes import (
+    all_assignable_codes,
+    code_aliases,
+    code_group,
+    code_to_name,
+    target_type,
+)
 
 STATIC_DIR = Path(__file__).with_name("static")
 ICON_PATH = STATIC_DIR / "assets" / "glorious-core.ico"
@@ -295,13 +301,15 @@ class OpenGloriousCoreWebController:
                 "active_profile": profile,
                 "active_layer": layer,
             },
-            # Remap-target catalog for the UI dropdown (group + type marker).
+            # Remap-target catalog for the UI search dropdown (group + type
+            # marker + G9 FIX C bounded search aliases, keycodes.CODE_ALIASES).
             "codes": [
                 {
                     "code": code,
                     "name": code_to_name(code),
                     "group": code_group(code),
                     "target_type": target_type(code),
+                    "aliases": list(code_aliases(code)),
                 }
                 for code in all_assignable_codes()
             ],
