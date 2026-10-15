@@ -141,10 +141,14 @@
                         <div class="keymap-head-actions">
                             <span id="keymap-dirty-counter" class="keymap-dirty-counter">0 unsaved changes</span>
                             <button id="keymap-refresh" class="button button-secondary">Reload from device</button>
+                            <button id="keymap-self-test" class="button button-secondary"
+                                title="Read-only scan of the keymap mirror against the board map (remap/KEYMAP_MAP.md). Never writes; runs only when clicked.">Run
+                                matrix self-test</button>
                         </div>
                     </div>
                     <p id="keymap-banner" class="keymap-banner is-hidden">Device buffer not initialized — showing
                         factory default</p>
+                    <pre id="keymap-selftest-report" class="keymap-selftest-report is-hidden"></pre>
                     <div id="keymap-profile-grid" class="keymap-profile-grid"></div>
                     <div class="keymap-body">
                         <div class="keymap-grid-wrap">
@@ -161,33 +165,39 @@
                                 <p class="surface-kicker">Editing keycap</p>
                                 <h4 id="keymap-editor-title">—</h4>
                             </div>
-                            <dl class="keymap-editor-facts">
-                                <div><dt>Current</dt>
-                                    <dd id="keymap-editor-current">—</dd>
+                            <p id="keymap-editor-unassigned" class="keymap-unassigned-note is-hidden">Unassigned
+                                matrix slot — no physical key (factory 0xFF). Writes here change no key
+                                (remap/KEYMAP_MAP.md).</p>
+                            <div id="keymap-editor-normal">
+                                <dl class="keymap-editor-facts">
+                                    <div><dt>Current</dt>
+                                        <dd id="keymap-editor-current">—</dd>
+                                    </div>
+                                    <div><dt>Factory</dt>
+                                        <dd id="keymap-editor-factory">—</dd>
+                                    </div>
+                                    <div><dt>Type</dt>
+                                        <dd id="keymap-editor-type">—</dd>
+                                    </div>
+                                </dl>
+                                <label class="keymap-editor-select">
+                                    <span>Remap to</span>
+                                    <input id="keymap-search" type="text" placeholder="Search keys, aliases, 0x59…"
+                                        autocomplete="off" spellcheck="false">
+                                    <div id="keymap-code-list" class="keymap-code-list" role="listbox"
+                                        aria-label="Remap targets"></div>
+                                </label>
+                                <div class="keymap-editor-actions">
+                                    <button id="keymap-revert-key" class="button button-secondary">Revert this
+                                        key</button>
+                                    <button id="keymap-unassign-key" class="button button-secondary">Unassign</button>
                                 </div>
-                                <div><dt>Factory</dt>
-                                    <dd id="keymap-editor-factory">—</dd>
+                                <div class="keymap-editor-commit">
+                                    <button id="keymap-write" class="button is-hidden" disabled>Write keys to
+                                        keyboard</button>
+                                    <button id="keymap-reset-all" class="button button-secondary">Reset active profile
+                                        to factory</button>
                                 </div>
-                                <div><dt>Type</dt>
-                                    <dd id="keymap-editor-type">—</dd>
-                                </div>
-                            </dl>
-                            <label class="keymap-editor-select">
-                                <span>Remap to</span>
-                                <input id="keymap-search" type="text" placeholder="Search keys, aliases, 0x59…"
-                                    autocomplete="off" spellcheck="false">
-                                <div id="keymap-code-list" class="keymap-code-list" role="listbox"
-                                    aria-label="Remap targets"></div>
-                            </label>
-                            <div class="keymap-editor-actions">
-                                <button id="keymap-revert-key" class="button button-secondary">Revert this key</button>
-                                <button id="keymap-unassign-key" class="button button-secondary">Unassign</button>
-                            </div>
-                            <div class="keymap-editor-commit">
-                                <button id="keymap-write" class="button is-hidden" disabled>Write keys to
-                                    keyboard</button>
-                                <button id="keymap-reset-all" class="button button-secondary">Reset active profile to
-                                    factory</button>
                             </div>
                         </aside>
                     </div>

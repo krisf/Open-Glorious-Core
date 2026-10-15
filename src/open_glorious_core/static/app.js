@@ -109,6 +109,18 @@ function keyEntryMatches(entry, query) {
 }
 // [PURE-SEARCH-END]
 
+// [PURE-DRAWER-START]
+// Pure, DOM-free drawer logic (G10 FIX 4). Extracted verbatim between these
+// markers and unit-tested headlessly by tests/test_keymap_slots_js.py (node).
+// A slot whose FACTORY code is 0xFF is an unassigned matrix slot: no physical
+// key sits there (remap/KEYMAP_MAP.md — the 55-59 head-of-block spares; the
+// operator's dead-write test proved a write to slot 58 changes no key). The
+// drawer shows the unassigned note INSTEAD of the normal editor for it.
+function keycapSlotIsUnassigned(meta) {
+  return Boolean(meta) && Number(meta.factory_code) === 0xFF;
+}
+// [PURE-DRAWER-END]
+
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 }
@@ -588,10 +600,14 @@ const km = {
   banner: document.getElementById("keymap-banner"),
   dirtyCounter: document.getElementById("keymap-dirty-counter"),
   refresh: document.getElementById("keymap-refresh"),
+  selfTest: document.getElementById("keymap-self-test"),
+  selfTestReport: document.getElementById("keymap-selftest-report"),
   profileGrid: document.getElementById("keymap-profile-grid"),
   grid: document.getElementById("keymap-grid"),
   editor: document.getElementById("keymap-editor"),
   editorTitle: document.getElementById("keymap-editor-title"),
+  editorNormal: document.getElementById("keymap-editor-normal"),
+  editorUnassigned: document.getElementById("keymap-editor-unassigned"),
   editorCurrent: document.getElementById("keymap-editor-current"),
   editorFactory: document.getElementById("keymap-editor-factory"),
   editorType: document.getElementById("keymap-editor-type"),
@@ -860,12 +876,46 @@ function renderKeymapEditor() {
   toggleHidden(km.editor, false);
   const meta = keymapSlotMeta(slot);
   setText(km.editorTitle, `${(meta && meta.physical) || "Keycap"} · slot ${slot}`);
+  // G10 FIX 4: factory-0xFF slot = unassigned matrix slot, no physical key.
+  // Show the honest note INSTEAD of the editor — writing there changes no
+  // key (the operator's slot-58 dead-write incident).
+  const unassigned = keycapSlotIsUnassigned(meta);
+  toggleHidden(km.editorUnassigned, !unassigned);
+  toggleHidden(km.editorNormal, unassigned);
+  if (unassigned) return;
   setText(km.editorCurrent, keymapCodeName(keymap.buffer[slot]));
   setText(km.editorFactory, meta ? keymapCodeName(meta.factory_code) : "—");
   setText(km.editorType, meta ? meta.code_type_label : "—");
   renderKeymapCodeList();
   if (km.revertKey) km.revertKey.disabled = !meta;
   if (km.unassignKey) km.unassignKey.disabled = false;
+}
+
+// G10 FIX 5: matrix self-test aid — DEFAULT OFF. Runs ONLY on this button
+// click; never on page load, never on any other action. The backend handler
+// is read-only (config-mirror GET), so no write path is reachable from here.
+async function runMatrixSelfTest() {
+  if (!km.selfTest || keymap.busy) return;
+  km.selfTest.disabled = true;
+  setText(km.selfTest, "Scanning…");
+  try {
+    const payload = await postAction("matrix-self-test");
+    if (!km.selfTestReport) return;
+    if (payload.ok && Array.isArray(payload.self_test)) {
+      km.selfTestReport.textContent = payload.self_test.join("\n");
+    } else {
+      km.selfTestReport.textContent = payload.message || "Matrix self-test unavailable.";
+    }
+    toggleHidden(km.selfTestReport, false);
+  } catch (error) {
+    if (km.selfTestReport) {
+      km.selfTestReport.textContent = `Matrix self-test failed: ${error}`;
+      toggleHidden(km.selfTestReport, false);
+    }
+  } finally {
+    km.selfTest.disabled = false;
+    setText(km.selfTest, "Run matrix self-test");
+  }
 }
 
 function selectKeymapSlot(slot) {
@@ -934,6 +984,7 @@ async function switchKeymapProfile(profile, layer) {
 }
 
 if (km.refresh) km.refresh.addEventListener("click", () => fetchKeystate());
+if (km.selfTest) km.selfTest.addEventListener("click", () => runMatrixSelfTest());
 if (km.writeButton) km.writeButton.addEventListener("click", () => writeKeymapBuffer());
 if (km.resetAll) km.resetAll.addEventListener("click", () => resetKeymapActiveProfile());
 if (km.revertKey) {

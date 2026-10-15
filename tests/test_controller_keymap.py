@@ -463,3 +463,137 @@ def test_lock_is_nonreentrant_contract(controller) -> None:
         assert acquired is False, "controller IO lock became reentrant"
     finally:
         ctrl._io_lock.release()
+
+
+# ---------------------------------------------------------------------------
+# G10 FIX 5: matrix self-test aid (opt-in, READ-ONLY)
+# ---------------------------------------------------------------------------
+
+
+def test_matrix_self_test_scans_mirror_with_zero_writes(controller) -> None:
+    ctrl, backend = controller
+    result = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)
+    assert result["ok"] is True
+    report = result["self_test"]
+    assert report and report[0].startswith("MATRIX SELF-TEST")
+    joined = "\n".join(report)
+    # The G10 incident facts are in the report: real CapsLock at slot 60.
+    caps_lines = [line for line in report if "Caps Lock" in line]
+    assert caps_lines and "slot  60" in caps_lines[0] and "0x39" in caps_lines[0]
+    assert "as mapped" in caps_lines[0]
+    assert "slot 58 bound to a cap: NO" in joined
+    assert "55, 56, 57, 58, 59" in joined
+    assert "Caps bound: 82" in joined
+    # READ-ONLY contract: the only device traffic is the config-mirror GET.
+    assert backend.calls_named("read_keymap")
+    for writer in ("set_keymap_codes", "reset_keymap", "change_profile"):
+        assert not backend.calls_named(writer), writer
+    assert result["message"] == (
+        "Matrix self-test complete — read-only scan, no writes sent."
+    )
+
+
+def test_matrix_self_test_flags_deviations_and_dead_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeBackend(codes=[
+        0x59 if slot == 60 else (0xFF if slot == 105 else FACTORY[slot])
+        for slot in range(KEYMAP_SLOTS)
+    ])
+    ctrl, _ = make_controller(monkeypatch, backend)
+    report = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)["self_test"]
+    lines = "\n".join(report)
+    caps_line = next(line for line in report if "Caps Lock" in line)
+    assert "0x59" in caps_line and "DEVIATES (factory 0x39)" in caps_line
+    space_line = next(line for line in report if "Space" in line)
+    assert "UNASSIGNED (0xFF) — keycap dead (factory 0x2C)" in space_line
+    assert "DEVIATES" in lines
+
+
+def test_matrix_self_test_blank_mirror_degrades_to_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeBackend()
+
+    def blank_read_keymap(profile=1, layer=1):
+        backend._note("read_keymap", profile, layer)
+        raise BackendError(BLANK_MIRROR_BACKEND_ERROR)
+
+    ctrl, backend = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(backend, "read_keymap", blank_read_keymap)
+    result = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)
+    assert result["ok"] is True
+    joined = "\n".join(result["self_test"])
+    assert "packaged factory defaults" in joined
+    assert "NOTE: Config mirror is blank" in joined
+    caps_line = next(l for l in result["self_test"] if "Caps Lock" in l)
+    assert "as mapped" in caps_line
+    for writer in ("set_keymap_codes", "reset_keymap", "change_profile"):
+        assert not backend.calls_named(writer), writer
+
+
+def test_matrix_self_test_all_zero_mirror_degrades_to_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctrl, _ = make_controller(monkeypatch, FakeBackend(codes=[0x00] * KEYMAP_SLOTS))
+    result = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)
+    assert result["ok"] is True
+    joined = "\n".join(result["self_test"])
+    assert "all-zero (shadow buffer)" in joined
+    assert "packaged factory defaults" in joined
+
+
+def test_matrix_self_test_without_device_is_honest_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctrl, _ = make_controller(monkeypatch, FakeBackend(available=False))
+    result = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)
+    assert result["ok"] is False
+    assert result["self_test"] is None
+    assert "Fake install hint." in result["message"]
+
+
+def test_matrix_self_test_non_blank_failure_stays_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # G8 discipline: ONLY the blank-mirror signature degrades.
+    backend = FakeBackend()
+
+    def gone_read_keymap(profile=1, layer=1):
+        backend._note("read_keymap", profile, layer)
+        raise BackendError("device vanished mid-scan")
+
+    ctrl, backend = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(backend, "read_keymap", gone_read_keymap)
+    result = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)
+    assert result["ok"] is False
+    assert result["self_test"] is None
+    assert "device vanished mid-scan" in result["message"]
+
+
+def test_cli_flag_prints_report_and_exits_before_gui(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class CliBackend(FakeBackend):
+        # main() builds its own controller, so the test cannot wire
+        # backend.lock; record calls without the lock assertion.
+        def _note(self, name: str, *args) -> None:
+            self.calls.append((name, *args))
+
+    backend = CliBackend()
+    monkeypatch.setattr(app_module, "create_backend", lambda: backend)
+    monkeypatch.setattr(app_module, "detect_gmmk_pro", lambda: [DEVICE])
+
+    def no_server(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("--self-test-matrix must not start the server")
+
+    monkeypatch.setattr(app_module, "ThreadingHTTPServer", no_server)
+    monkeypatch.setattr("sys.argv", ["app.py", app_module.MATRIX_SELF_TEST_FLAG])
+    with pytest.raises(SystemExit) as exitinfo:
+        app_module.main()
+    assert exitinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "MATRIX SELF-TEST" in out
+    assert "Caps Lock" in out
+    assert "slot 58 bound to a cap: NO" in out
+    assert not backend.calls_named("set_keymap_codes")

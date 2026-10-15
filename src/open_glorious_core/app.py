@@ -78,6 +78,98 @@ KEYMAP_BLANK_MIRROR_MESSAGE = (
     "still land and physical key test is the only verification."
 )
 
+# --- G10 FIX 5: matrix self-test aid (DEFAULT OFF — explicit opt-in only) ---
+# The GUI never runs this scan on its own: it fires ONLY on an operator click
+# of "Run matrix self-test" (POST /api/action) or the CLI flag
+# `--self-test-matrix`. The scan is READ-ONLY by construction — it reads the
+# config mirror through the same GET path the panel open uses and calls no
+# writer, ever.
+MATRIX_SELF_TEST_FLAG = "--self-test-matrix"
+MATRIX_SELF_TEST_ACTION = "matrix-self-test"
+
+SLOT_TABLE_JS_PATH = STATIC_DIR / "keymap-slots.js"
+SLOT_TABLE_START = "// [KEYMAP-SLOT-TABLE-START]"
+SLOT_TABLE_END = "// [KEYMAP-SLOT-TABLE-END]"
+
+
+def load_slot_table(path: Path = SLOT_TABLE_JS_PATH) -> dict:
+    """Parse the strict-JSON slot block shipped in static/keymap-slots.js.
+
+    The JS file is the single source of truth for the visual-row slot
+    mapping (transcribed from remap/KEYMAP_MAP.md); parsing it here keeps
+    Python-side consumers (the self-test report) on the SAME table the grid
+    renders — a second transcription in Python is exactly the drift class
+    that produced the slot-58 incident.
+    """
+    text = path.read_text(encoding="utf-8")
+    block = text.split(SLOT_TABLE_START, 1)[1].split(SLOT_TABLE_END, 1)[0]
+    payload = block.split("var KEYMAP_SLOT_TABLE = ", 1)[1].rsplit(";", 1)[0]
+    return json.loads(payload)
+
+
+SLOT_TABLE = load_slot_table()
+
+SELF_TEST_CAPS_BOUND = sum(
+    1
+    for row in SLOT_TABLE["rows"]
+    for key in row["keys"]
+    if key is not None
+)
+
+
+def build_matrix_self_test_report(
+    codes: list[int], factory: bytes, source_label: str, notes: list[str]
+) -> list[str]:
+    """Scan report: which GUI-labeled keys are alive per the map.
+
+    ``codes`` is the slot->code table to audit (device mirror, or the
+    factory table on the blank-mirror degradation). Pure function — the
+    headless tests feed it tables directly.
+    """
+    lines = [
+        "MATRIX SELF-TEST — read-only scan of the config mirror (GET only, "
+        "ZERO writes).",
+        f"Source: {source_label}",
+    ]
+    lines.extend(f"NOTE: {note}" for note in notes)
+    lines.append("")
+    for row in SLOT_TABLE["rows"]:
+        lines.append(f"# {row['name']}")
+        for slot, key in zip(row["slots"], row["keys"]):
+            if key is None:
+                continue  # keycap-less positions: reported in the spares block
+            code = int(codes[slot])
+            factory_code = int(factory[slot])
+            if code == factory_code:
+                status = "as mapped"
+            elif code == KEYMAP_UNASSIGNED:
+                status = f"UNASSIGNED (0xFF) — keycap dead (factory 0x{factory_code:02X})"
+            else:
+                status = f"DEVIATES (factory 0x{factory_code:02X})"
+            lines.append(f"  slot {slot:>3}  {key:<12} code 0x{code:02X}  {status}")
+    lines.append("")
+    lines.append("Keycap-less slots (never rendered, bound to NO cap):")
+    lines.append("  14, 72, 92                 matrix artifacts (KEYMAP_MAP.md 32-42)")
+    lines.append("  55, 56, 57, 58, 59         head of row-4 block, factory 0xFF "
+                 "(KEYMAP_MAP.md 115-119) — the G10 dead-write slots")
+    lines.append("  103, 104, 106, 107, 111   row-6 spacers, factory 0xFF")
+    bound_58 = any(
+        slot == 58
+        for row in SLOT_TABLE["rows"]
+        for slot, key in zip(row["slots"], row["keys"])
+        if key is not None
+    )
+    lines.append(
+        f"Caps bound: {SELF_TEST_CAPS_BOUND}; slot 58 bound to a cap: "
+        f"{'YES — DEFECT' if bound_58 else 'NO'}"
+    )
+    lines.append(
+        "The mirror scan reports codes, not presses: physical aliveness of a "
+        "labeled key is confirmed ONLY by pressing it (see KEYMAP_MAP.md "
+        "provenance of the slot map)."
+    )
+    return lines
+
 
 def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
     grouped: dict[tuple[str, str, str, str], dict[str, object]] = {}
@@ -265,8 +357,9 @@ class OpenGloriousCoreWebController:
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
-                    # G9 FIX A: False for the 8 matrix positions that carry no
-                    # keycap (see NON_KEYCAP_SLOTS). The UI renders those as
+                    # G9 FIX A + G10: False for the 13 matrix positions that
+                    # carry no keycap (see NON_KEYCAP_SLOTS, incl. the
+                    # head-of-block spares 55-59). The UI renders those as
                     # invisible spacers — a "#NNN" label never appears.
                     "is_keycap": entry.slot not in NON_KEYCAP_SLOTS,
                 }
@@ -324,10 +417,70 @@ class OpenGloriousCoreWebController:
             ],
         }
 
+    def matrix_self_test(self) -> dict[str, Any]:
+        """G10 FIX 5: read-only matrix scan (opt-in ONLY — button click /
+        CLI flag; the GUI never fires it on its own).
+
+        Reports which GUI-labeled keys are alive per the map by auditing the
+        config mirror against the slot table (keymap-slots.js /
+        remap/KEYMAP_MAP.md). It performs a config-mirror GET — the same
+        traffic as opening the keymap panel — and calls NO writer: apply /
+        reset / switch-profile are never reached. On the G8 blank-mirror
+        signature it degrades to auditing the packaged factory defaults,
+        honestly labelled.
+        """
+        detected = detect_gmmk_pro()
+        self.backend = self.backend or create_backend()
+        if hasattr(self.backend, "open") and detected:
+            self.backend.open(detected[0])
+        try:
+            if not self.backend.is_available():
+                return {
+                    "ok": False,
+                    "message": "Matrix self-test needs the keyboard: "
+                    + self.backend.install_hint(),
+                    "self_test": None,
+                }
+            profile = int(getattr(self.backend, "profile", 1))
+            layer = int(getattr(self.backend, "layer", 1))
+            notes: list[str] = []
+            try:
+                entries = self._backend_io(self.backend.read_keymap, profile, layer)
+                factory = self.backend.default_keymap_table()
+                codes = [int(entry.scancode) for entry in entries]
+                source = f"device mirror (profile {profile} layer {layer})"
+                if all(code == 0x00 for code in codes):
+                    # G6/G8 shadow buffer: all-zero mirror is not a keymap.
+                    codes = [int(byte) for byte in factory]
+                    source = "packaged factory defaults"
+                    notes.append(
+                        "device mirror is all-zero (shadow buffer) — auditing the "
+                        "packaged factory defaults instead"
+                    )
+            except BackendError as exc:
+                if KEYMAP_BLANK_MIRROR_SIGNATURE not in str(exc):
+                    return {"ok": False, "message": str(exc), "self_test": None}
+                factory = self.backend.default_keymap_table()
+                codes = [int(byte) for byte in factory]
+                source = "packaged factory defaults"
+                notes.append(KEYMAP_BLANK_MIRROR_MESSAGE)
+            report = build_matrix_self_test_report(codes, factory, source, notes)
+            return {
+                "ok": True,
+                "message": "Matrix self-test complete — read-only scan, no writes sent.",
+                "self_test": report,
+            }
+        finally:
+            if hasattr(self.backend, "close"):
+                self.backend.close()
+
     def run_action(self, action: str, value: Any = None) -> dict[str, Any]:
         try:
             if action == "refresh":
                 return self.get_state()
+            if action == MATRIX_SELF_TEST_ACTION:
+                # G10: opt-in read-only scan; never fired on page load.
+                return self.matrix_self_test()
             if action == "set_brightness":
                 message = self._backend_io(self.backend.set_brightness, int(value), True)
             elif action == "set_effect":
@@ -447,7 +600,26 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def run_matrix_self_test_cli() -> int:
+    """G10 FIX 5 CLI form: print the read-only matrix audit and exit — no
+    server, no Qt window. Opt-in only (``--self-test-matrix``); performs no
+    writes (same read-only path as the GUI button)."""
+    controller = OpenGloriousCoreWebController()
+    result = controller.matrix_self_test()
+    report = result.get("self_test")
+    if report:
+        for line in report:
+            print(line)
+        print(result.get("message", ""))
+        return 0
+    print(f"Matrix self-test unavailable: {result.get('message', 'unknown error')}")
+    return 1
+
+
 def main() -> None:
+    if MATRIX_SELF_TEST_FLAG in sys.argv[1:]:
+        sys.exit(run_matrix_self_test_cli())
+
     controller = OpenGloriousCoreWebController()
 
     def handler(*args, **kwargs):

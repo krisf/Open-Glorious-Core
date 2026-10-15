@@ -541,6 +541,35 @@ output {
     font-size: 0.92rem;
 }
 
+/* G10 FIX 4: drawer note for an unassigned matrix slot (factory 0xFF, no
+   physical key) — shown INSTEAD of the normal editor. */
+.keymap-unassigned-note {
+    margin: 0;
+    padding: 12px 14px;
+    border: 1px solid rgba(243, 154, 35, 0.45);
+    border-radius: var(--radius-md);
+    background: rgba(243, 154, 35, 0.12);
+    color: var(--accent);
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+
+/* G10 FIX 5: matrix self-test report (opt-in click only, read-only scan). */
+.keymap-selftest-report {
+    margin: 0 0 16px;
+    padding: 14px 16px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-md);
+    background: var(--panel-2);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    white-space: pre;
+    overflow: auto;
+    max-height: 420px;
+}
+
 .keymap-profile-grid {
     display: grid;
     grid-template-columns: repeat(9, minmax(0, 1fr));

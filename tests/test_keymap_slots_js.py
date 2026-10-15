@@ -111,3 +111,50 @@ def test_app_js_binds_caps_from_the_table_not_a_stride_formula() -> None:
         "through the KEYMAP_MAP.md row table"
     )
     assert "KEYMAP_TABLE.rows" in app
+
+
+# --- G10 FIX 4: unassigned-slot drawer note (pure predicate via node) --------
+
+DRAWER_START = "// [PURE-DRAWER-START]"
+DRAWER_END = "// [PURE-DRAWER-END]"
+
+
+def _eval_drawer(expr: str):
+    text = APP_JS.read_text(encoding="utf-8")
+    section = text.split(DRAWER_START, 1)[1].split(DRAWER_END, 1)[0]
+    script = f"{section}\nconsole.log(JSON.stringify({expr}));\n"
+    result = subprocess.run(
+        [_node(), "-e", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_unassigned_predicate_flags_factory_0xff_slots() -> None:
+    # Factory 0xFF = unassigned matrix slot: the note replaces the editor.
+    assert _eval_drawer("keycapSlotIsUnassigned({factory_code: 0xFF})") is True
+    assert _eval_drawer("keycapSlotIsUnassigned({factory_code: 0x39})") is False
+    assert _eval_drawer("keycapSlotIsUnassigned(null)") is False
+    assert _eval_drawer("keycapSlotIsUnassigned({})") is False
+
+
+def test_drawer_and_selftest_wiring_present() -> None:
+    app = APP_JS.read_text(encoding="utf-8")
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    # Drawer note wired into renderKeymapEditor (note shown, editor hidden).
+    editor = app.split("function renderKeymapEditor()", 1)[1].split("\n}", 1)[0]
+    assert "keycapSlotIsUnassigned(meta)" in editor
+    assert "toggleHidden(km.editorNormal, unassigned)" in editor
+    assert "if (unassigned) return;" in editor
+    # Note element exists and is DEFAULT-hidden.
+    assert 'id="keymap-editor-unassigned"' in html
+    assert "keymap-unassigned-note is-hidden" in html
+    # Self-test aid: button + report exist, report DEFAULT-hidden; the handler
+    # fires ONLY from the click wiring (definition + one call site).
+    assert 'id="keymap-self-test"' in html and "Run\n                                matrix self-test" in html
+    assert 'id="keymap-selftest-report" class="keymap-selftest-report is-hidden"' in html
+    assert app.count("runMatrixSelfTest(") == 2  # definition + click wiring
+    assert 'km.selfTest.addEventListener("click", () => runMatrixSelfTest());' in app
+    assert "postAction(\"matrix-self-test\")" in app
+    assert app.count('id="keymap-editor-normal"') == 0  # id lives in index.html
+    assert 'id="keymap-editor-normal"' in html
