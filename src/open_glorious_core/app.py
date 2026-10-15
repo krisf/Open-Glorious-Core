@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,12 +14,17 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication
 
+from . import lastgood
 from .backend import (
+    EMPIRICAL_CAPS_CODE,
+    EMPIRICAL_CAPS_SLOT,
+    EMPIRICAL_CAPS_TYPE,
     KEYMAP_SLOTS,
     KEYMAP_SLOT_LABELS,
     KEYMAP_UNASSIGNED,
     BackendError,
     KeymapEntry,
+    apply_empirical_overlay,
     create_backend,
 )
 from .device import HidDevice, detect_gmmk_pro
@@ -79,6 +85,114 @@ KEYMAP_BLANK_MIRROR_MESSAGE = (
     "board post-factory-reset); showing packaged factory defaults. Writes "
     "still land and physical key test is the only verification."
 )
+
+# --- G12: automated remap verification + self-healing revert -----------------
+# Physics constraint (G12_AUTOVERIFY_PLAN.md): a remap's effect is observable
+# ONLY through a physical keystroke. What IS automated here: the verdict is
+# read from OS keyboard-event codes (this endpoint, not the operator's eyes),
+# and failure is REPAIRED (auto-revert to the last-good matrix). The operator
+# spends one optional keystroke; if they spend none, the app reverts.
+VERIFY_TIMEOUT_SECONDS = 60.0
+VERIFY_ARM_BANNER = "press your remapped key once (60 s)"
+VERIFY_MATCH_TEMPLATE = "VERIFIED — {key} now emits {name}"
+VERIFY_REVERT_BANNER = "no input seen — auto-reverted to last good config"
+VERIFY_SEED_NO_REVERT_BANNER = (
+    "no input seen — NOT auto-reverted: this profile/layer has no "
+    "operator-confirmed config yet (the last-good seed is only the unchanged "
+    "factory table)"
+)
+VERIFY_NO_REVERT_BANNER = (
+    "no input seen — NOT auto-reverted: this profile/layer has no "
+    "operator-confirmed config yet"
+)
+VERIFY_REVERT_FAILED_TEMPLATE = (
+    "no input seen — AUTO-REVERT FAILED: {error} (device state unverified; "
+    "manual recovery required)"
+)
+# Kept in the app log (controller.app_log, surfaced in every verify payload).
+VERIFY_LOG_LIMIT = 200
+
+# Explicit HID usage -> KeyboardEvent.code variants (G12 plan item 3). The
+# matcher maps the EXPECTED HID code of a remap to every code value the OS can
+# report for it — including the NumLock-dependent keypad variants, the exact
+# class the capslock incident was made of (0x59 with NumLock OFF emits End,
+# NOT Numpad1). Codes with no browser keydown identity (vendor raw bytes, Fn,
+# unassigned, system/editing usages) map to () : the key emits nothing the OS
+# can observe, so the matcher can never match and the self-heal path decides.
+KEY_EVENT_CODE_VARIANTS: dict[int, tuple[str, ...]] = {
+    0x02: (),  # knob/mute vendor raw — no browser keydown identity
+    0xA0: (),  # Fn — firmware-internal, emits no OS keydown
+    0xFF: (),  # Unassigned — the key emits NOTHING (timeout is the answer)
+    0x04: ("KeyA",), 0x05: ("KeyB",), 0x06: ("KeyC",), 0x07: ("KeyD",),
+    0x08: ("KeyE",), 0x09: ("KeyF",), 0x0A: ("KeyG",), 0x0B: ("KeyH",),
+    0x0C: ("KeyI",), 0x0D: ("KeyJ",), 0x0E: ("KeyK",), 0x0F: ("KeyL",),
+    0x10: ("KeyM",), 0x11: ("KeyN",), 0x12: ("KeyO",), 0x13: ("KeyP",),
+    0x14: ("KeyQ",), 0x15: ("KeyR",), 0x16: ("KeyS",), 0x17: ("KeyT",),
+    0x18: ("KeyU",), 0x19: ("KeyV",), 0x1A: ("KeyW",), 0x1B: ("KeyX",),
+    0x1C: ("KeyY",), 0x1D: ("KeyZ",),
+    0x1E: ("Digit1",), 0x1F: ("Digit2",), 0x20: ("Digit3",), 0x21: ("Digit4",),
+    0x22: ("Digit5",), 0x23: ("Digit6",), 0x24: ("Digit7",), 0x25: ("Digit8",),
+    0x26: ("Digit9",), 0x27: ("Digit0",),
+    0x28: ("Enter",), 0x29: ("Escape",), 0x2A: ("Backspace",), 0x2B: ("Tab",),
+    0x2C: ("Space",), 0x2D: ("Minus",), 0x2E: ("Equal",),
+    0x2F: ("BracketLeft",), 0x30: ("BracketRight",), 0x31: ("Backslash",),
+    0x32: ("IntlBackslash",), 0x33: ("Semicolon",), 0x34: ("Quote",),
+    0x35: ("Backquote",), 0x36: ("Comma",), 0x37: ("Period",),
+    0x38: ("Slash",),
+    0x39: ("CapsLock",),  # the empirical slot-58 cell's own code
+    0x3A: ("F1",), 0x3B: ("F2",), 0x3C: ("F3",), 0x3D: ("F4",),
+    0x3E: ("F5",), 0x3F: ("F6",), 0x40: ("F7",), 0x41: ("F8",),
+    0x42: ("F9",), 0x43: ("F10",), 0x44: ("F11",), 0x45: ("F12",),
+    0x46: ("PrintScreen",), 0x47: ("ScrollLock",), 0x48: ("Pause",),
+    0x49: ("Insert",), 0x4A: ("Home",), 0x4B: ("PageUp",), 0x4C: ("Delete",),
+    0x4D: ("End",), 0x4E: ("PageDown",), 0x4F: ("RightArrow",),
+    0x50: ("LeftArrow",), 0x51: ("DownArrow",), 0x52: ("UpArrow",),
+    0x53: ("NumLock",), 0x54: ("NumpadDivide",), 0x55: ("NumpadMultiply",),
+    0x56: ("NumpadSubtract",), 0x57: ("NumpadAdd",), 0x58: ("NumpadEnter",),
+    # NumLock-dependent keypad variants (G12 plan item 3, the capslock class):
+    # with NumLock OFF the keypad cells emit their navigation codes.
+    0x59: ("Numpad1", "End"),
+    0x5A: ("Numpad2", "Down"),
+    0x5B: ("Numpad3", "PageDown"),
+    0x5C: ("Numpad4", "Left"),
+    0x5D: ("Numpad5", "Clear"),
+    0x5E: ("Numpad6", "Right"),
+    0x5F: ("Numpad7", "Home"),
+    0x60: ("Numpad8", "Up"),
+    0x61: ("Numpad9", "PageUp"),
+    0x62: ("Numpad0", "Insert"),
+    0x63: ("NumpadDecimal", "Delete"),
+    0x64: ("Backslash", "IntlBackslash"),  # non-US \| , layout-dependent
+    0x65: ("ContextMenu",),
+    0x66: (),  # Power — system-level, never a browser keydown
+    0x67: ("NumpadEqual",),
+    0x68: ("F13",), 0x69: ("F14",), 0x6A: ("F15",), 0x6B: ("F16",),
+    0x6C: ("F17",), 0x6D: ("F18",), 0x6E: ("F19",), 0x6F: ("F20",),
+    0x70: ("F21",), 0x71: ("F22",), 0x72: ("F23",), 0x73: ("F24",),
+    0x74: ("Execute",), 0x75: ("Help",), 0x76: ("ContextMenu",),
+    0x77: (), 0x78: ("AudioVolumeStop",), 0x79: ("Again",), 0x7A: ("Undo",),
+    0x7B: ("Cut",), 0x7C: ("Copy",), 0x7D: ("Paste",), 0x7E: ("Find",),
+    0x7F: ("VolumeMute",), 0x80: ("VolumeUp",), 0x81: ("VolumeDown",),
+    0x82: ("CapsLock",), 0x83: ("NumLock",), 0x84: ("ScrollLock",),
+    0x85: ("NumpadComma",), 0x86: ("NumpadEqual",),
+    0x87: ("IntlRo", "International1"), 0x88: ("IntlYen", "International2"),
+    0x89: ("International3",), 0x8A: ("International4",),
+    0x8B: ("International5",), 0x8C: ("International6",),
+    0x8D: ("International7",), 0x8E: ("International8",),
+    0x8F: ("International9",),
+    0x90: ("Lang1",), 0x91: ("Lang2",), 0x92: ("Lang3",), 0x93: ("Lang4",),
+    0x94: ("Lang5",), 0x95: ("Lang6",), 0x96: ("Lang7",), 0x97: ("Lang8",),
+    0x98: ("Lang9",), 0x99: ("Lang10",),
+    0xE0: ("ControlLeft",), 0xE1: ("ShiftLeft",), 0xE2: ("AltLeft",),
+    0xE3: ("MetaLeft",), 0xE4: ("ControlRight",), 0xE5: ("ShiftRight",),
+    0xE6: ("AltRight",), 0xE7: ("MetaRight",),
+}
+
+
+def key_event_variants(code: int) -> tuple[str, ...]:
+    """Every KeyboardEvent.code the OS can report for an expected HID code."""
+    return KEY_EVENT_CODE_VARIANTS.get(int(code), ())
+
 
 # --- G10 FIX 5: matrix self-test aid (DEFAULT OFF — explicit opt-in only) ---
 # The GUI never runs this scan on its own: it fires ONLY on an operator click
@@ -203,6 +317,33 @@ def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
     return list(grouped.values())
 
 
+class _VerifyArmed:
+    """One armed verification of a written remap (G12 plan item 3).
+
+    ``variants`` is the union of every KeyboardEvent.code the expected HID
+    codes can produce (incl. the NumLock-off keypad variants — the exact class
+    the capslock incident was made of). The armed object identity doubles as
+    the timer token: a cancelled timer firing late sees a mismatch and stops.
+    """
+
+    def __init__(
+        self,
+        slot: int,
+        expect: tuple[int, ...],
+        variants: frozenset[str],
+        profile: int,
+        layer: int,
+        timeout: float,
+    ) -> None:
+        self.slot = slot
+        self.expect = expect
+        self.variants = variants
+        self.profile = profile
+        self.layer = layer
+        self.deadline = time.monotonic() + timeout
+        self.timer: threading.Timer | None = None
+
+
 class OpenGloriousCoreWebController:
     def __init__(self) -> None:
         self.backend = create_backend()
@@ -210,11 +351,261 @@ class OpenGloriousCoreWebController:
         # request its own thread, and the feature-report interface is a
         # single shared device — never interleave report exchanges.
         self._io_lock = threading.Lock()
+        # G12 verify-armed state: the armed matcher + its 60 s auto-revert
+        # timer. _verify_state/_verify_banner carry the last verdict so the UI
+        # (and the tests) can read the outcome: armed | verified | reverted |
+        # no-input-no-revert | revert-failed.
+        self._verify_lock = threading.Lock()
+        self._verify_armed: _VerifyArmed | None = None
+        self._verify_state: str | None = None
+        self._verify_banner: str | None = None
+        self._verify_timeout = VERIFY_TIMEOUT_SECONDS
+        # The app log: audit lines for arm / match / timeout / revert
+        # (surfaced in every verify payload; G12 plan item 3 "log line").
+        self.app_log: list[str] = []
 
     def _backend_io(self, call, *args):
         """Run one backend (HID-touching) call under the controller lock."""
         with self._io_lock:
             return call(*args)
+
+    # -- G12: app log + last-good insurance ---------------------------------
+
+    def _log_line(self, text: str) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.app_log.append(f"[{stamp}] {text}")
+        del self.app_log[:-VERIFY_LOG_LIMIT]
+
+    def _factory_table(self) -> bytes:
+        """Packaged factory codes (the last-good seed vector)."""
+        return self.backend.default_keymap_table()
+
+    def _record_last_good_apply(self, profile: int, layer: int, codes: bytes) -> None:
+        """Persist a successfully applied matrix (G12 plan item 1).
+
+        The applied codes ride in ``pending`` — the revertable last-good
+        changes ONLY on an operator-confirmed press (item 4), so an
+        unconfirmed write can never become its own revert target.
+        """
+        try:
+            lastgood.record_apply(
+                profile, layer, list(codes), self._factory_table()
+            )
+        except (OSError, lastgood.LastGoodError) as exc:
+            self._log_line(f"last-good snapshot write failed: {exc}")
+
+    # -- G12: verify-armed matcher + auto-revert -----------------------------
+
+    def arm_verify(
+        self, slot: object, expect: object, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """POST /api/verify-remap: arm the matcher for a written slot.
+
+        ``expect`` is the list of HID codes the remapped key must now emit;
+        the server maps them to KeyboardEvent.code variants (explicit table,
+        incl. NumLock-dependent keypad variants) and starts the timeout. On
+        expiry with no matching keydown the last-good matrix is written back
+        — ONLY if an operator has previously confirmed a press for this pair
+        (item 4: a seed state is never auto-written; it is flagged honestly).
+        """
+        try:
+            slot_index = int(slot)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": "verify-remap needs an integer 'slot'.",
+                "verify": self.verify_view(),
+            }
+        if not 0 <= slot_index < KEYMAP_SLOTS:
+            return {
+                "ok": False,
+                "message": f"Keymap slot must be 0..{KEYMAP_SLOTS - 1}, got {slot_index}.",
+                "verify": self.verify_view(),
+            }
+        if not isinstance(expect, (list, tuple)) or not expect:
+            return {
+                "ok": False,
+                "message": "verify-remap needs a non-empty 'expect' list of HID codes.",
+                "verify": self.verify_view(),
+            }
+        codes: list[int] = []
+        for item in expect:
+            try:
+                code = int(item)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "message": "verify-remap 'expect' entries must be integers.",
+                    "verify": self.verify_view(),
+                }
+            if not 0 <= code <= 0xFF:
+                return {
+                    "ok": False,
+                    "message": "verify-remap 'expect' entries must be 0x00-0xFF.",
+                    "verify": self.verify_view(),
+                }
+            codes.append(code)
+        profile = int(getattr(self.backend, "profile", 1))
+        layer = int(getattr(self.backend, "layer", 1))
+        try:
+            lastgood.ensure_seed(profile, layer, self._factory_table())
+        except (OSError, lastgood.LastGoodError) as exc:
+            return {
+                "ok": False,
+                "message": f"verify-remap cannot seed last-good: {exc}",
+                "verify": self.verify_view(),
+            }
+        seconds = self._verify_timeout if timeout is None else float(timeout)
+        armed = _VerifyArmed(
+            slot_index,
+            tuple(codes),
+            frozenset(v for code in codes for v in key_event_variants(code)),
+            profile,
+            layer,
+            seconds,
+        )
+        with self._verify_lock:
+            if self._verify_armed is not None and self._verify_armed.timer is not None:
+                self._verify_armed.timer.cancel()
+            self._verify_armed = armed
+            self._verify_state = "armed"
+            self._verify_banner = VERIFY_ARM_BANNER
+            armed.timer = threading.Timer(seconds, self._on_verify_timeout, args=(armed,))
+            armed.timer.daemon = True
+            armed.timer.start()
+        expect_text = " ".join(f"0x{code:02X}" for code in codes)
+        self._log_line(
+            f"verify-armed: slot {slot_index} expects [{expect_text}] on profile "
+            f"{profile} layer {layer} ({seconds:.0f} s)"
+        )
+        return {
+            "ok": True,
+            "message": VERIFY_ARM_BANNER,
+            "verify": self.verify_view(),
+        }
+
+    def record_key_event(self, code: object, key: object = None) -> dict[str, Any]:
+        """POST /api/keyevent: one keydown observed while the app had focus.
+
+        No storage beyond the armed verification pending (G12 plan item 2):
+        the event is a live signal, matched against the armed expectation and
+        dropped. A match cancels the auto-revert, marks the last-good verified
+        and reports the verdict; everything else is a silent no-op.
+        """
+        if not isinstance(code, str) or not code:
+            return {"ok": False, "message": "keyevent needs a non-empty string 'code'."}
+        with self._verify_lock:
+            armed = self._verify_armed
+            if armed is None or code not in armed.variants:
+                # Dropped: no arm, or a keydown that matches nothing. verify_view()
+                # takes the same non-reentrant lock, so it runs after release.
+                dropped = True
+            else:
+                dropped = False
+                if armed.timer is not None:
+                    armed.timer.cancel()
+                self._verify_armed = None
+                self._verify_state = "verified"
+                matched_code = next(
+                    (c for c in armed.expect if code in key_event_variants(c)),
+                    armed.expect[0],
+                )
+                banner = VERIFY_MATCH_TEMPLATE.format(
+                    key=key if isinstance(key, str) and key else code,
+                    name=code_to_name(matched_code),
+                )
+                self._verify_banner = banner
+                profile, layer, slot = armed.profile, armed.layer, armed.slot
+        if dropped:
+            return {"ok": True, "recorded": False, "verify": self.verify_view()}
+        confirmed = lastgood.confirm(profile, layer)
+        if confirmed is None:
+            self._log_line(
+                f"verify-verified: keydown {code} matched slot {slot} — last-good "
+                f"NOT marked (no snapshot file)"
+            )
+        else:
+            self._log_line(
+                f"verify-verified: keydown {code} matched slot {slot} — last-good "
+                f"snapshot for profile {profile} layer {layer} marked verified"
+            )
+        return {"ok": True, "recorded": True, "message": banner, "verify": self.verify_view()}
+
+    def _on_verify_timeout(self, armed: _VerifyArmed) -> None:
+        """60 s with no matching keydown: self-heal (G12 plan items 3 + 4)."""
+        with self._verify_lock:
+            if self._verify_armed is not armed:
+                return  # cancelled (matched / rearmed) — stale timer
+            self._verify_armed = None
+        state = lastgood.load(armed.profile, armed.layer)
+        if state is not None and state["verified"]:
+            try:
+                self._auto_revert_write(armed.profile, armed.layer, state["codes"])
+            except BackendError as exc:
+                self._verify_state = "revert-failed"
+                self._verify_banner = VERIFY_REVERT_FAILED_TEMPLATE.format(error=exc)
+                self._log_line(
+                    f"verify-timeout: auto-revert FAILED for profile "
+                    f"{armed.profile} layer {armed.layer}: {exc}"
+                )
+                return
+            self._verify_state = "reverted"
+            self._verify_banner = VERIFY_REVERT_BANNER
+            self._log_line(
+                f"verify-timeout: no input seen in {self._verify_timeout:.0f} s — "
+                f"auto-reverted profile {armed.profile} layer {armed.layer} to "
+                "last-good (single cmd-0x01 bind + cmd-0x03 matrix, proven path)"
+            )
+            return
+        # Item 4: NO auto-write on an unverified state. The seed is only the
+        # unchanged factory table — safe in principle, unconfirmed in fact:
+        # the banner says so honestly, the keyboard stays untouched.
+        banner = (
+            VERIFY_SEED_NO_REVERT_BANNER
+            if state is not None and state["seed"]
+            else VERIFY_NO_REVERT_BANNER
+        )
+        self._verify_state = "no-input-no-revert"
+        self._verify_banner = banner
+        self._log_line(
+            f"verify-timeout: no input seen and no operator-verified last-good "
+            f"for profile {armed.profile} layer {armed.layer} — NOT auto-reverted "
+            + ("(seed = unchanged factory table)" if state is not None and state["seed"] else "")
+        )
+
+    def _auto_revert_write(self, profile: int, layer: int, codes: list[int]) -> None:
+        """Write the last-good matrix back — the proven recovery path: one
+        cmd-0x01 bind + one cmd-0x03 full-matrix write (G11 recovery recipe,
+        remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE note). No per-key writes, no
+        retry storms: exactly one exchange per command."""
+
+        def _revert() -> None:
+            try:
+                self.backend.change_profile(profile, layer)  # cmd 0x01 bind
+            except BackendError as exc:
+                # The WB blank mirror can never verify a bind (G8); the bind is
+                # best-effort — the healing write below must not die with it.
+                self._log_line(
+                    f"verify-revert: profile {profile} layer {layer} bind "
+                    f"unverified ({exc}) — continuing with the matrix write"
+                )
+            self.backend.set_keymap_codes(profile, layer, bytes(codes))  # cmd 0x03
+
+        self._backend_io(_revert)
+
+    def verify_view(self) -> dict[str, Any]:
+        """Snapshot of the verify-armed state for the UI (and tests)."""
+        with self._verify_lock:
+            armed = self._verify_armed
+            return {
+                "armed": armed is not None,
+                "state": self._verify_state,
+                "banner": self._verify_banner if self._verify_state else None,
+                "slot": armed.slot if armed is not None else None,
+                "expect": list(armed.expect) if armed is not None else [],
+                "timeout_seconds": self._verify_timeout,
+                "log": list(self.app_log[-20:]),
+            }
 
     def get_state(self) -> dict[str, Any]:
         devices = detect_gmmk_pro()
@@ -353,19 +744,48 @@ class OpenGloriousCoreWebController:
             codes = [int(byte) for byte in factory]
 
         types = self._default_types()
+        # G12 item 6: display overlay for the EMPIRICAL caps cell. The vendor
+        # factory byte at slot 58 is 0xFF, so the factory-default degradation
+        # rendered slot 58 as "Unassigned (0xFF) · unused" while the operator
+        # keycap there is Caps Lock — the exact misreading that hid the G11
+        # kill. Source: remap/KEYMAP_MAP.md "EMPIRICAL-FIRMWARE" (G11,
+        # operator-verified: physical CapsLock cell = slot 58, code 0x39,
+        # type 0x01). Overlay scope is honest and narrow: it applies ONLY to
+        # the factory-defaults display path (is_dirty_source); a real device
+        # byte (e.g. 0x59 after a remap, or a genuine 0xFF = dead cell) is
+        # displayed as reported. default_keymap.bin is NOT rewritten — this
+        # is a display overlay plus the write overlay in reset_keymap.
+        display_codes = list(codes)
+        display_types = types
+        if is_dirty_source:
+            display_codes, display_types = apply_empirical_overlay(
+                bytes(codes), types if types is not None else bytes(KEYMAP_SLOTS)
+            )
         slots = []
         for entry in entries:
-            code = codes[entry.slot]
-            type_byte = types[entry.slot] if types is not None and entry.slot < len(types) else None
+            code = display_codes[entry.slot]
+            type_byte = (
+                display_types[entry.slot]
+                if display_types is not None and entry.slot < len(display_types)
+                else None
+            )
             slots.append(
                 {
                     "slot": entry.slot,
                     "code": code,
                     "code_name": code_to_name(code),
+                    "code_type": type_byte,
                     "code_type_label": KEYMAP_TYPE_LABELS.get(type_byte, "reserved"),
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
+                    "overlay": (
+                        "empirical-caps (remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE)"
+                        if is_dirty_source and entry.slot == EMPIRICAL_CAPS_SLOT
+                        and code == EMPIRICAL_CAPS_CODE
+                        and int(factory[entry.slot]) != EMPIRICAL_CAPS_CODE
+                        else None
+                    ),
                     # G9 FIX A + G10: False for the 13 matrix positions that
                     # carry no keycap (see NON_KEYCAP_SLOTS, incl. the
                     # head-of-block spares 55-59). The UI renders those as
@@ -402,6 +822,9 @@ class OpenGloriousCoreWebController:
             "message": message,
             "backend": self.backend.name,
             "devices": grouped_devices,
+            # G12: verify-armed state (banner + verdict + recent log lines)
+            # rides on every keystate fetch so the drawer banner refreshes.
+            "verify": self.verify_view(),
             "keymap": {
                 "profile": profile,
                 "layer": layer,
@@ -538,6 +961,11 @@ class OpenGloriousCoreWebController:
                 message = self._backend_io(
                     self.backend.set_keymap_codes, profile, layer, bytes(raw)
                 )
+                # G12 item 1: persist every applied matrix as last-good
+                # insurance. Runs OUTSIDE the io lock's backend call; the
+                # applied codes ride in `pending` and only become the
+                # revertable state on an operator-confirmed press (item 4).
+                self._record_last_good_apply(profile, layer, bytes(raw))
             elif action == "reset-keymap":
                 profile = int(getattr(self.backend, "profile", 1))
                 layer = int(getattr(self.backend, "layer", 1))
@@ -582,7 +1010,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path != "/api/action":
+        if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent"):
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -592,6 +1020,20 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
         except json.JSONDecodeError:
             self._send_json({"ok": False, "message": "Invalid JSON payload."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(payload, dict):
+            payload = {}
+
+        if self.path == "/api/verify-remap":
+            # G12: arm the matcher for a just-written slot (60 s auto-revert).
+            result = self.controller.arm_verify(payload.get("slot"), payload.get("expect"))
+            self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
+            return
+        if self.path == "/api/keyevent":
+            # G12: one keydown observed by the page logger. Matched against
+            # the armed expectation only — no storage beyond that.
+            result = self.controller.record_key_event(payload.get("code"), payload.get("key"))
+            self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
             return
 
         result = self.controller.run_action(payload.get("action", ""), payload.get("value"))

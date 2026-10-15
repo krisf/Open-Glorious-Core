@@ -606,6 +606,7 @@ const keymap = {
 
 const km = {
   banner: document.getElementById("keymap-banner"),
+  verifyBanner: document.getElementById("keymap-verify-banner"),
   dirtyCounter: document.getElementById("keymap-dirty-counter"),
   refresh: document.getElementById("keymap-refresh"),
   selfTest: document.getElementById("keymap-self-test"),
@@ -628,6 +629,72 @@ const km = {
 };
 
 const KEYMAP_BANNER_TEXT = km.banner ? km.banner.textContent.trim() : "";
+
+// --- G12: remap verification + self-healing revert (front end) --------------
+// Physics constraint: a remap's effect is observable ONLY through a physical
+// keystroke. This front end (a) forwards every keydown to /api/keyevent while
+// the page has focus, (b) arms the server-side matcher right after a write,
+// and (c) paints the verdict banner. The 60 s timer, the matcher and the
+// auto-revert all live server-side (app.py) — the UI cannot forge a VERIFIED.
+let verifyPollTimer = null;
+
+function applyVerifyState(verify) {
+  if (!km.verifyBanner) return;
+  if (!verify || !verify.banner) {
+    toggleHidden(km.verifyBanner, true);
+    return;
+  }
+  setText(km.verifyBanner, verify.banner);
+  toggleHidden(km.verifyBanner, false);
+}
+
+async function postVerifyRemap(slot, expect) {
+  try {
+    const response = await fetch("/api/verify-remap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot, expect }),
+    });
+    const payload = await response.json();
+    applyVerifyState(payload.verify);
+    if (payload.ok && payload.verify && payload.verify.timeout_seconds) {
+      // One refetch shortly after the server-side timer expires, so the
+      // auto-revert verdict (banner + restored grid) lands without a reload.
+      if (verifyPollTimer) window.clearTimeout(verifyPollTimer);
+      verifyPollTimer = window.setTimeout(
+        () => { fetchKeystate(); },
+        payload.verify.timeout_seconds * 1000 + 2000,
+      );
+    }
+    return payload;
+  } catch (error) {
+    return null; // verification is best-effort; it must never break the UI
+  }
+}
+
+function firstDirtyKeymapSlot() {
+  if (!keymap.buffer || !keymap.baseline) return null;
+  for (let slot = 0; slot < KEYMAP_SLOT_COUNT; slot += 1) {
+    if (keymap.buffer[slot] !== keymap.baseline[slot]) return slot;
+  }
+  return null;
+}
+
+async function postKeyEvent(code, key) {
+  try {
+    const response = await fetch("/api/keyevent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, key }),
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    applyVerifyState(payload.verify);
+  } catch (error) {
+    // The logger is fire-and-forget: a lost event only means "no input seen"
+    // server-side, which self-heals (auto-revert), never corrupts the UI.
+  }
+}
 
 function keymapCodes() {
   return (keymap.payload && keymap.payload.codes) || [];
@@ -687,6 +754,7 @@ function showKeymapProblem(message) {
 
 function applyKeystate(payload) {
   keymap.payload = payload;
+  applyVerifyState(payload.verify); // G12: keep the verdict banner in sync
   const data = keymapData();
   if (!data) {
     showKeymapProblem(payload.message || "Keymap unavailable.");
@@ -953,6 +1021,10 @@ function setBufferCode(code) {
 async function writeKeymapBuffer() {
   const count = keymapDirtyCount();
   if (!keymapIsEditable() || count === 0) return;
+  // G12: snapshot the first dirty slot + its target code BEFORE the write
+  // resets the baseline, so the matcher arms against the code we just wrote.
+  const verifySlot = firstDirtyKeymapSlot();
+  const verifyExpect = verifySlot == null ? null : [keymap.buffer[verifySlot]];
   keymap.busy = true;
   renderKeymapMeta();
   renderKeymapProfiles();
@@ -961,6 +1033,9 @@ async function writeKeymapBuffer() {
   keymap.busy = false;
   if (payload.ok) {
     await fetchKeystate();
+    if (verifySlot != null && verifyExpect && verifyExpect.length) {
+      await postVerifyRemap(verifySlot, verifyExpect);
+    }
   } else {
     renderKeymapMeta();
   }
@@ -1060,3 +1135,14 @@ fetchState().catch((error) => {
   setText(els.statusPill, "Error");
 });
 fetchKeystate();
+
+// G12 item 2: keydown logger. Every keydown while this page has focus is
+// forwarded to the localhost /api/keyevent as {code, key}; the server-side
+// armed matcher (app.py) is the ONLY judge of a remap verdict. Nothing is
+// stored server-side beyond the armed pending, events seen while nothing is
+// armed are dropped, and a lost event self-heals (auto-revert) — so this
+// listener must never throw into the UI.
+document.addEventListener("keydown", (event) => {
+  if (!event || !event.code) return;
+  postKeyEvent(event.code, event.key);
+});

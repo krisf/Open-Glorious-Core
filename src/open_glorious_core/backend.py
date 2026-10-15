@@ -61,6 +61,38 @@ KEYMAP_CODES_OFFSET = 0x80
 CODES_TABLE_ANCHOR = bytes((0x29, 0x3A, 0x3B, 0x3C))
 REPORT_ID_ECHO = 0x07
 
+# G12 — EMPIRICAL caps overlay (source: remap/KEYMAP_MAP.md "EMPIRICAL-FIRMWARE"
+# note, operator-verified 2026-10-15 on the WB5092 firmware, 320F:5092): the
+# physical CapsLock cell is slot 58, NOT the vendor Buttoninfo_Default's 60.
+# Pushing the raw vendor vector (0xFF @58) PHYSICALLY KILLED CapsLock (the G11
+# incident); the recovery write that restored it is 0x39 @58 with type 0x01.
+# Every factory reset must therefore apply this overlay, so a reset can never
+# repeat that kill. The packaged data files keep the vendor bytes — the
+# overlay is write- and display-side only (G12 plan item 6: do NOT rewrite
+# default_keymap.bin).
+EMPIRICAL_CAPS_SLOT = 58
+EMPIRICAL_CAPS_CODE = 0x39
+EMPIRICAL_CAPS_TYPE = 0x01
+EMPIRICAL_OVERLAY_CODES = {EMPIRICAL_CAPS_SLOT: EMPIRICAL_CAPS_CODE}
+EMPIRICAL_OVERLAY_TYPES = {EMPIRICAL_CAPS_SLOT: EMPIRICAL_CAPS_TYPE}
+
+
+def apply_empirical_overlay(
+    codes: bytes | bytearray, types: bytes | bytearray
+) -> tuple[bytes, bytes]:
+    """Return (codes, types) with the EMPIRICAL-FIRMWARE caps cell applied.
+
+    Only slot 58 changes (0x39 / type 0x01); every other byte is passed
+    through untouched. Used by ``reset_keymap`` (write overlay) and the GUI
+    display (G12 plan item 6)."""
+    overlaid_codes = bytearray(codes)
+    overlaid_types = bytearray(types)
+    for slot, code in EMPIRICAL_OVERLAY_CODES.items():
+        overlaid_codes[slot] = code
+    for slot, type_byte in EMPIRICAL_OVERLAY_TYPES.items():
+        overlaid_types[slot] = type_byte
+    return bytes(overlaid_codes), bytes(overlaid_types)
+
 
 def locate_codes_table(response: bytes | bytearray) -> int:
     """Offset of the 120-byte codes table inside a GET config-mirror response.
@@ -549,7 +581,8 @@ class StockGmmkProBackend(BaseBackend):
         )
 
     def reset_keymap(self, profile: int = 1, layer: int = 1) -> str:
-        """Restore factory defaults: packaged default codes + default types.
+        """Restore factory defaults: packaged default codes + default types,
+        with the G12 EMPIRICAL caps overlay applied.
 
         There is no dedicated reset command: "reset" means writing the captured
         factory table back with the same cmd-0x03 matrix write, using the
@@ -557,12 +590,21 @@ class StockGmmkProBackend(BaseBackend):
         shipped dumps, never from what the device mirrors; the mirror is still
         read first so a write to a NON-active profile/layer is refused (G8: a
         fully blank shadow mirror is the shadow-only state — never refused).
+
+        G12 (plan item 5): the factory vector is written through
+        ``apply_empirical_overlay`` — codes[58]=0x39, types[58]=0x01 — the
+        operator-verified recovery recipe from remap/KEYMAP_MAP.md
+        "EMPIRICAL-FIRMWARE". The RAW vendor bytes (0xFF @58) physically kill
+        CapsLock on this firmware (G11 incident), so a factory reset that
+        skipped the overlay would repeat that kill; this pin is regression-
+        pinned by the G12 E2E test.
         """
         # Shadow-tolerant active-slot guard + device presence (G8).
         self._read_config_mirror_shadow_tolerant(profile, layer)
-        shadow = self._write_keymap_matrix(
-            self._default_keymap_table(), self._default_types(), profile, layer
+        codes, types = apply_empirical_overlay(
+            self._default_keymap_table(), self._default_types()
         )
+        shadow = self._write_keymap_matrix(codes, types, profile, layer)
         if shadow:
             return self._shadow_write_message("the factory default keymap", profile, layer)
         return (
