@@ -11,6 +11,7 @@ dist/
 out/
 tmp_extract_test/
 reverse/
+scratch/
 
 packaging/pkg/
 packaging/src/

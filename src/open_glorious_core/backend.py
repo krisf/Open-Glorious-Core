@@ -152,6 +152,17 @@ class QmkHidBackend(BaseBackend):
         return result.stdout.strip() or "Done."
 
 
+class _AutoDetect:
+    """Sentinel type: hidraw unset -> auto-detect the vendor interface (legacy default).
+
+    Kept distinct from ``None`` so callers (unit tests) can pass an explicit
+    ``hidraw=None`` meaning "no device, do not auto-detect, do no device IO".
+    """
+
+
+_AUTO_DETECT = _AutoDetect()
+
+
 class StockGmmkProBackend(BaseBackend):
     name = "stock-hidraw-glorious"
     REPORT_ID = 7
@@ -193,8 +204,10 @@ class StockGmmkProBackend(BaseBackend):
         "white": (255, 255, 255),
     }
 
-    def __init__(self) -> None:
-        self.hidraw = self._detect_stock_interface()
+    def __init__(self, hidraw: Path | None | _AutoDetect = _AUTO_DETECT) -> None:
+        self.hidraw: Path | None = (
+            self._detect_stock_interface() if isinstance(hidraw, _AutoDetect) else hidraw
+        )
         self.state = KeyboardState(brightness=100, effect=7, speed=50, red=255, green=255, blue=255)
         self.color_name = "white"
         self.color_rgb = (255, 255, 255)
