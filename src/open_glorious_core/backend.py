@@ -28,12 +28,61 @@ class KeyboardState:
     blue: int | None = None
 
 
+# Commands of the vendor report-7 protocol, decoded from Glorious CORE 2.1.22's
+# own TypeScript (remap/PROTOCOL_DECODE.md; transport = FEATURE report ID 7).
+CMD_CHANGE_PROFILE = 0x01  # 4 selector bytes ONLY (ChangeProfileID)
+CMD_KEY_MATRIX = 0x03  # the keymap WRITE (SendButtonMatrix2Device)
+CMD_GET_CONFIG = 0x81  # 129: config-mirror read (our proven read path)
+
 # Keymap table location inside the 256-byte config mirror exposed by a GET of
 # feature report 7 (remap/DISCOVERY.md "OPERATOR RUN"): 120 slots, one USB HID
 # usage byte per physical key in row-major order, 0xFF = unassigned slot.
+# CANONICAL (no-echo) offset; hidraw may echo the report ID as byte 0 and shift
+# everything by one -> use locate_codes_table(), never this constant, to parse a
+# live response.
 KEYMAP_OFFSET = 0x80
 KEYMAP_SLOTS = 120
 KEYMAP_UNASSIGNED = 0xFF
+
+# cmd 0x03 KeyMatrix payload layout (SendButtonMatrix2Device, PROTOCOL_DECODE.md):
+# per-key type bytes at [8..127], key codes at [128..247], both 120 bytes.
+KEYMAP_TYPES_OFFSET = 0x08
+KEYMAP_CODES_OFFSET = 0x80
+
+# First four factory codes (Esc F1 F2 F3): the anchor used to locate the codes
+# table inside a GET response whatever the report-ID-echo shape is.
+CODES_TABLE_ANCHOR = bytes((0x29, 0x3A, 0x3B, 0x3C))
+REPORT_ID_ECHO = 0x07
+
+
+def locate_codes_table(response: bytes | bytearray) -> int:
+    """Offset of the 120-byte codes table inside a GET config-mirror response.
+
+    Two shapes are seen on this protocol (remap/DISCOVERY.md, operator runs
+    2-3): probe-era captures stored the payload alone (table at 0x80) and the
+    live ``_exchange_feature_report`` path gets the 0x07 report ID echoed as
+    byte 0, shifting every payload byte by one (table at 0x81). Resolve it
+    robustly, in order:
+
+    1. factory anchor - the codes table starts with the factory keycodes
+       ``29 3A 3B 3C`` (Esc F1 F2 F3); test the echo-aware candidates first;
+    2. anchor scan anywhere in the buffer (covers a shifted/odd framing);
+    3. fall back to the plain slice, 0x80, or 0x81 when byte 0 is the echoed
+       report ID - a remapped Esc breaks the anchor, the echo shape does not
+       move the table.
+
+    Returns the offset; callers slice ``response[off : off + KEYMAP_SLOTS]``.
+    """
+    buf = bytes(response)
+    echo = 1 if buf[:1] == bytes((REPORT_ID_ECHO,)) else 0
+    candidates = (KEYMAP_OFFSET + echo, KEYMAP_OFFSET, KEYMAP_OFFSET + 1)
+    for offset in dict.fromkeys(candidates):
+        if buf[offset : offset + len(CODES_TABLE_ANCHOR)] == CODES_TABLE_ANCHOR:
+            return offset
+    anchor = buf.find(CODES_TABLE_ANCHOR)
+    if anchor != -1:
+        return anchor
+    return KEYMAP_OFFSET + echo
 
 # slot -> physical key name for the GMMK Pro 75 % board (full derivation:
 # remap/KEYMAP_MAP.md). Slots 14 / 72 / 92 carry non-FF raw bytes in the factory
@@ -369,32 +418,82 @@ class StockGmmkProBackend(BaseBackend):
         self._apply_current_state()
         return "Re-sent the current stock RGB state to the keyboard."
 
-    # -- Keymap (Phase 2) ---------------------------------------------------
+    # -- Keymap (Phase 2, G5: decoded write path) ---------------------------
     #
-    # Read path is PROVEN (remap/DISCOVERY.md): a GET of feature report 7
-    # mirrors the ACTIVE profile's 256-byte config buffer; the live keymap is
-    # the byte slice 0x80-0xF7. The write path below is H1, an UNVERIFIED
-    # hypothesis: the existing profile-update command (cmd 1) carrying the FULL
-    # config payload persists it — the same cmd the RGB setters use with
-    # mostly-zero payloads. Every byte-level H1 assumption lives in
-    # _build_keymap_write_payload so a fallback (e.g. hypothesis H2, a dedicated
-    # remap command) stays a one-method swap.
+    # READ path is PROVEN (remap/DISCOVERY.md): a GET of feature report 7
+    # mirrors the ACTIVE profile's 256-byte config buffer; the codes table is
+    # located with locate_codes_table() (0x80, or 0x81 behind an echoed report
+    # ID) and is 120 bytes of one USB HID usage byte per slot.
+    #
+    # WRITE path is the vendor protocol read directly out of Glorious CORE
+    # 2.1.22's own TypeScript (remap/PROTOCOL_DECODE.md): cmd 0x03 KeyMatrix
+    # carries the WHOLE matrix in one report — selectors at [2]/[3], per-key
+    # TYPES at [8..127], CODES at [128..247]. No auth, no unlock, no handshake.
+    #
+    # The Phase-2 "H1" hypothesis (cmd 0x01 = full-config write) is REFUTED on
+    # device (remap/DISCOVERY.md operator run 3): cmd 0x01 is ChangeProfile,
+    # FOUR selector bytes, and the firmware ignores everything past [3]. That
+    # builder is gone; cmd 1 keeps strictly ChangeProfile semantics here
+    # (change_profile / _prepare_change_profile_buffer).
+    #
+    # CORE's source indexes profiles/layers from 0 and sends `index + 1`; this
+    # API is 1-based, exactly like the config-mirror header (profile 1 / layer 1
+    # reads 01 01), so the wire selector bytes equal the values callers pass.
 
     def read_keymap(self, profile: int = 1, layer: int = 1) -> list[KeymapEntry]:
         """Return all 120 keymap slots of the active profile/layer mirror."""
         mirror = self._read_config_mirror(profile, layer)
-        table = mirror[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS]
+        table = self._codes_table(mirror)
         return [
             KeymapEntry(slot=slot, scancode=byte, label=KEYMAP_SLOT_LABELS.get(slot))
             for slot, byte in enumerate(table)
         ]
 
-    def set_keymap(self, entries: list[KeymapEntry], profile: int = 1, layer: int = 1) -> str:
+    def set_keymap_codes(
+        self,
+        profile: int,
+        layer: int,
+        codes: bytes | bytearray | list[int],
+        types: bytes | bytearray | list[int] | None = None,
+    ) -> str:
+        """Write the FULL 120-slot key matrix with cmd 0x03 (KeyMatrix).
+
+        ``codes`` is the complete table (120 bytes, one HID usage byte per
+        slot); ``types`` is the matching 120-byte per-key type array and
+        defaults to the packaged vendor ``data/default_types.bin``
+        (Buttoninfo_Default types: 0x01 normal x77, 0x02 x7 = the modifiers,
+        0x03 consumer x1 = the knob/mute, 0xFF unused x35; PROTOCOL_DECODE.md).
+        The config mirror is read first — the mirror only exposes
+        the ACTIVE profile, so writing a non-active slot is refused instead of
+        silently hitting the wrong slot — then ONE report is sent (never
+        retried) and the mirror re-read to byte-compare the codes table.
+
+        Types are not part of the GET mirror, so only the codes are verifiable
+        read-back; that limitation is stated in the returned message.
+        """
+        codes_bytes = self._matrix_bytes("Keymap codes", codes)
+        types_bytes = (
+            self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
+        )
+        self._read_config_mirror(profile, layer)  # active-slot guard + device presence
+        self._write_keymap_matrix(codes_bytes, types_bytes, profile, layer)
+        return (
+            f"Wrote the full {KEYMAP_SLOTS}-slot key matrix to profile {profile} layer {layer} "
+            "(cmd 3 KeyMatrix); read-back verified against the full codes table "
+            "(types are not mirrored by GET and cannot be read back)."
+        )
+
+    def set_keymap(
+        self,
+        entries: list[KeymapEntry],
+        profile: int = 1,
+        layer: int = 1,
+        types: bytes | bytearray | list[int] | None = None,
+    ) -> str:
         """Write the given keymap slots onto the current table and persist.
 
-        Builds one cmd-1 full-payload report (H1), sends it exactly once, then
-        re-reads the mirror and byte-compares the whole keymap slice; raises
-        BackendError on any mismatch without claiming what the device kept.
+        Reads the mirror, patches the slots, then sends the whole patched
+        matrix through cmd 0x03 (the vendor protocol has no per-key write).
         """
         entries = list(entries)
         if not entries:
@@ -407,41 +506,102 @@ class StockGmmkProBackend(BaseBackend):
                 raise BackendError(f"Duplicate keymap slot {entry.slot} in entries.")
             seen.add(entry.slot)
         mirror = self._read_config_mirror(profile, layer)
-        table = bytearray(mirror[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS])
+        codes = bytearray(self._codes_table(mirror))
         for entry in entries:
-            table[entry.slot] = entry.scancode
-        self._write_keymap_table(bytes(table), mirror, profile, layer)
+            codes[entry.slot] = entry.scancode
+        types_bytes = (
+            self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
+        )
+        self._write_keymap_matrix(bytes(codes), types_bytes, profile, layer)
         return (
             f"Applied {len(entries)} keymap change(s) on profile {profile} layer {layer}; "
-            "read-back verified against the full keymap slice."
+            "read-back verified against the full codes table."
         )
 
     def reset_keymap(self, profile: int = 1, layer: int = 1) -> str:
-        """Restore the factory keymap captured in data/default_keymap.bin.
+        """Restore factory defaults: packaged default codes + default types.
 
-        No dedicated reset command was found in P1; "reset" means writing the
-        captured factory table back through the same (H1) write path.
+        There is no dedicated reset command: "reset" means writing the captured
+        factory table back with the same cmd-0x03 matrix write, using the
+        vendor Buttoninfo_Default types array. The table written comes from the
+        shipped dumps, never from what the device mirrors; the mirror is still
+        read first so a write to a NON-active profile/layer is refused.
         """
-        table = self._default_keymap_table()
-        mirror = self._read_config_mirror(profile, layer)
-        self._write_keymap_table(table, mirror, profile, layer)
+        self._read_config_mirror(profile, layer)  # active-slot guard + device presence
+        self._write_keymap_matrix(
+            self._default_keymap_table(), self._default_types(), profile, layer
+        )
         return (
             f"Restored the factory default keymap on profile {profile} layer {layer}; "
-            "read-back verified against the full keymap slice."
+            "read-back verified against the full codes table."
         )
+
+    def change_profile(self, profile: int, layer: int) -> str:
+        """Switch the active profile/layer: cmd 0x01 ChangeProfile.
+
+        Exactly four meaningful bytes — [0]=report ID, [1]=1, [2]=profile,
+        [3]=layer (CORE sends profile/layer index + 1; this API is 1-based).
+        The firmware ignores anything past [3], so no payload is packed. Sent
+        once, then the mirror is re-read to confirm the device switched.
+        """
+        if not self.hidraw:
+            raise BackendError(self.install_hint())
+        report = self._build_change_profile_report(profile, layer)
+        self._send_feature_report(report)
+        self._sync_active_profile_layer()
+        if (self.profile, self.layer) != (int(profile), int(layer)):
+            raise BackendError(
+                "ChangeProfile verification FAILED: the mirror still reports profile "
+                f"{self.profile} / layer {self.layer}, not {profile} / {layer}. The switch is "
+                "UNCONFIRMED — do not chain more writes."
+            )
+        return f"Switched to profile {profile} layer {layer} (cmd 1 ChangeProfile); read-back confirmed."
 
     @staticmethod
     def _default_keymap_table() -> bytes:
         """Factory keymap table shipped inside the package (app never depends
         on remap/ at runtime)."""
-        path = Path(__file__).resolve().parent / "data" / "default_keymap.bin"
+        return StockGmmkProBackend._read_default_data("default_keymap.bin", "factory keymap table")
+
+    @staticmethod
+    def _default_types() -> bytes:
+        """Vendor Buttoninfo_Default per-key TYPES shipped inside the package
+        (remap/PROTOCOL_DECODE.md: 0x01 x77 normal, 0x02 x7, 0x03 x1 consumer,
+        0xFF x35 unused)."""
+        return StockGmmkProBackend._read_default_data("default_types.bin", "factory key types array")
+
+    @staticmethod
+    def _read_default_data(filename: str, what: str) -> bytes:
+        path = Path(__file__).resolve().parent / "data" / filename
         try:
-            table = path.read_bytes()
+            data = path.read_bytes()
         except OSError as exc:
-            raise BackendError(f"Shipped factory keymap table is missing or unreadable: {exc}") from exc
+            raise BackendError(f"Shipped {what} is missing or unreadable: {exc}") from exc
+        if len(data) != KEYMAP_SLOTS:
+            raise BackendError(f"Shipped {what} must be {KEYMAP_SLOTS} bytes, found {len(data)}.")
+        return data
+
+    @staticmethod
+    def _matrix_bytes(name: str, data: object, length: int = KEYMAP_SLOTS) -> bytes:
+        """Coerce a codes/types sequence to exactly ``length`` bytes."""
+        try:
+            raw = bytes(data)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise BackendError(
+                f"{name} must be a sequence of {length} byte values 0x00-0xFF, got {data!r}."
+            ) from exc
+        if len(raw) != length:
+            raise BackendError(f"{name} must be exactly {length} bytes, got {len(raw)}.")
+        return raw
+
+    def _codes_table(self, mirror: bytes | bytearray) -> bytes:
+        """The 120-byte codes table of a config mirror, echo-shape agnostic."""
+        offset = locate_codes_table(mirror)
+        table = bytes(mirror[offset : offset + KEYMAP_SLOTS])
         if len(table) != KEYMAP_SLOTS:
             raise BackendError(
-                f"Shipped factory keymap must be {KEYMAP_SLOTS} bytes, found {len(table)}."
+                f"Config mirror is too short to hold the {KEYMAP_SLOTS}-byte codes table "
+                f"at offset 0x{offset:02X} (buffer {len(mirror)} bytes)."
             )
         return table
 
@@ -452,7 +612,7 @@ class StockGmmkProBackend(BaseBackend):
         for name, value in (("profile", profile), ("layer", layer)):
             if not 1 <= int(value) <= 3:
                 raise BackendError(f"{name.capitalize()} must be 1-3, got {value!r}.")
-        request = self._make_request(129)
+        request = self._make_request(CMD_GET_CONFIG)
         request[2] = profile
         request[3] = layer
         response = self._exchange_feature_report(request)
@@ -469,43 +629,62 @@ class StockGmmkProBackend(BaseBackend):
             )
         return response
 
-    def _build_keymap_write_payload(
-        self, mirror: bytearray, table: bytes, profile: int, layer: int
+    def _build_key_matrix_report(
+        self,
+        profile: int,
+        layer: int,
+        codes: bytes,
+        types: bytes | None = None,
     ) -> bytearray:
-        """H1 write report, the ONLY place the write hypothesis is encoded.
+        """cmd 0x03 KeyMatrix report — the ONLY keymap-write encoding.
 
-        cmd 1 (profile-update) carrying the full config payload: header
-        [0]=report id, [1]=cmd, [2]=profile, [3]=layer, then mirror bytes
-        0..253 at report bytes 2..255 — the same 2-byte report/mirror shift the
-        proven RGB setters show (write report[8]/[9] brightness == mirror[6]/[7]).
-        The keymap slice sits at report bytes 0x82..0xF9 (mirror 0x80 shifted).
+        Byte-exact against remap/PROTOCOL_DECODE.md (SendButtonMatrix2Device):
+        ``[0]=0x07`` report id, ``[1]=0x03`` command, ``[2]=profile``,
+        ``[3]=layer`` (CORE's 0-based index + 1 == our 1-based value), per-key
+        TYPES at ``[8..127]``, CODES at ``[128..247]``, tail zero.
         """
-        if len(table) != KEYMAP_SLOTS:
-            raise BackendError(f"Keymap table must be {KEYMAP_SLOTS} bytes, got {len(table)}.")
+        codes_bytes = self._matrix_bytes("Keymap codes", codes)
+        types_bytes = (
+            self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
+        )
         report = bytearray(self.REPORT_LENGTH)
         report[0] = self.REPORT_ID
-        report[1] = 1
-        report[2 : 2 + self.REPORT_LENGTH - 2] = mirror[0 : self.REPORT_LENGTH - 2]
-        report[2] = int(profile)
-        report[3] = int(layer)
-        header = 2
-        report[header + KEYMAP_OFFSET : header + KEYMAP_OFFSET + KEYMAP_SLOTS] = table
+        report[1] = CMD_KEY_MATRIX
+        report[2] = self._selector(profile, "profile")
+        report[3] = self._selector(layer, "layer")
+        report[KEYMAP_TYPES_OFFSET : KEYMAP_TYPES_OFFSET + KEYMAP_SLOTS] = types_bytes
+        report[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS] = codes_bytes
         return report
 
-    def _write_keymap_table(
-        self, table: bytes, mirror: bytearray, profile: int, layer: int
-    ) -> None:
-        payload = self._build_keymap_write_payload(mirror, table, profile, layer)
+    def _build_change_profile_report(self, profile: int, layer: int) -> bytearray:
+        """cmd 0x01 ChangeProfile report: four selector bytes, nothing else."""
+        report = bytearray(self.REPORT_LENGTH)
+        report[0] = self.REPORT_ID
+        report[1] = CMD_CHANGE_PROFILE
+        report[2] = self._selector(profile, "profile")
+        report[3] = self._selector(layer, "layer")
+        return report
+
+    @staticmethod
+    def _selector(value: int, name: str) -> int:
+        number = int(value)
+        if not 1 <= number <= 3:
+            raise BackendError(f"{name.capitalize()} must be 1-3, got {value!r}.")
+        return number
+
+    def _write_keymap_matrix(self, codes: bytes, types: bytes, profile: int, layer: int) -> None:
+        """Send the matrix once, then byte-verify the mirror's codes table."""
+        payload = self._build_key_matrix_report(profile, layer, codes, types)
         self._send_feature_report(payload)
         verified = self._read_config_mirror(profile, layer)
-        actual = verified[KEYMAP_OFFSET : KEYMAP_OFFSET + KEYMAP_SLOTS]
-        if bytes(actual) != bytes(table):
-            diffs = [slot for slot in range(KEYMAP_SLOTS) if actual[slot] != table[slot]]
+        actual = self._codes_table(verified)
+        if actual != bytes(codes):
+            diffs = [slot for slot in range(KEYMAP_SLOTS) if actual[slot] != codes[slot]]
             first = diffs[0]
             raise BackendError(
                 "Keymap write verification FAILED: read-back does not match the payload "
                 f"(first difference at slot {first}: mirror 0x{actual[first]:02X}, "
-                f"payload 0x{table[first]:02X}; {len(diffs)} of {KEYMAP_SLOTS} slots differ). "
+                f"payload 0x{codes[first]:02X}; {len(diffs)} of {KEYMAP_SLOTS} slots differ). "
                 "The write is UNCONFIRMED and the device state is unknown — re-read the "
                 "keymap before attempting anything else."
             )
@@ -524,7 +703,7 @@ class StockGmmkProBackend(BaseBackend):
         profile_update = bytearray(self.REPORT_LENGTH)
         self._prepare_properties_buffer(properties)
         self._prepare_effect_buffer(effect)
-        self._prepare_profile_update_buffer(profile_update)
+        self._prepare_change_profile_buffer(profile_update)
         self._send_feature_report(properties)
         self._send_feature_report(effect)
         self._send_feature_report(profile_update)
@@ -555,9 +734,13 @@ class StockGmmkProBackend(BaseBackend):
         report[16] = green
         report[17] = blue
 
-    def _prepare_profile_update_buffer(self, report: bytearray) -> None:
+    def _prepare_change_profile_buffer(self, report: bytearray) -> None:
+        """cmd 1 ChangeProfile: re-assert the active profile/layer (four
+        selector bytes). NOT a config write — firmware ignores bytes past [3]
+        (remap/PROTOCOL_DECODE.md); CORE sends this last in its connect
+        sequence, which is why the RGB setters keep ending with it."""
         report[0] = self.REPORT_ID
-        report[1] = 1
+        report[1] = CMD_CHANGE_PROFILE
         report[2] = self.profile
         report[3] = self.layer
 
@@ -575,8 +758,22 @@ class StockGmmkProBackend(BaseBackend):
         report[3] = self.layer
         return report
 
-    def _parse_profile_layer_response(self, response: bytearray) -> tuple[int, int] | None:
+    @staticmethod
+    def _parse_profile_layer_response(response: bytearray) -> tuple[int, int] | None:
+        """Parse (profile, layer) from a GET config-mirror response.
+
+        Two framings exist on this protocol (remap/DISCOVERY.md operator runs
+        2-3): the live hidraw read echoes the 0x07 report ID as byte 0 and
+        shifts the payload, putting the selectors at [1]/[2]; payload-only
+        captures (the probe-era fixture) keep them at [0]/[1]. [0]/[1] is tried
+        first — in the echoed framing byte 0 is 0x07, outside the valid 1-3
+        selector range, so it can never match by accident — then the echoed
+        pair, the legacy [2]/[3] pair (kept for the Phase 0 characterization
+        tests) and the historical [8]/[9] candidate. Same rule as
+        locate_codes_table(): parse the shape, never hardcode one offset.
+        """
         candidates = [
+            (response[0], response[1]),
             (response[1], response[2]),
             (response[2], response[3]),
             (response[8], response[9]),

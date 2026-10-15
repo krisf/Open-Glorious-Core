@@ -252,22 +252,25 @@ def test_effect_speed_inversion_is_clamped(backend: StockGmmkProBackend) -> None
 
 
 # ---------------------------------------------------------------------------
-# _prepare_profile_update_buffer — cmd 1, profile, layer
+# _prepare_change_profile_buffer — cmd 1 ChangeProfile, selector bytes only
 # ---------------------------------------------------------------------------
 
 
-def test_profile_update_buffer_layout(backend: StockGmmkProBackend) -> None:
+def test_change_profile_buffer_layout(backend: StockGmmkProBackend) -> None:
+    # cmd 1 is ChangeProfile (remap/PROTOCOL_DECODE.md): FOUR selector bytes and
+    # nothing else. Renamed from _prepare_profile_update_buffer, whose name sold
+    # the refuted H1 reading of this command as a full-config write.
     backend.profile = 3
     backend.layer = 2
 
     buf = bytearray(256)
-    backend._prepare_profile_update_buffer(buf)
+    backend._prepare_change_profile_buffer(buf)
 
     assert buf[0] == 7  # feature report ID
-    assert buf[1] == 1  # profile-update (persist) command
-    assert buf[2] == 3  # profile
-    assert buf[3] == 2  # layer
-    assert all(byte == 0 for byte in buf[4:])
+    assert buf[1] == 1  # ChangeProfile command
+    assert buf[2] == 3  # profile selector
+    assert buf[3] == 2  # layer selector
+    assert all(byte == 0 for byte in buf[4:])  # firmware ignores bytes past [3]
 
 
 # ---------------------------------------------------------------------------
