@@ -81,3 +81,20 @@ CapsLock ASDFGHJKL;' Enter PageDown / Shift ZXCVBNM,./ RShift Up End /
 Ctrl LWin Alt Space RAlt fn RCtrl Left Down Right
 → `iIndex` = `Matrix_LEDCode.indexOf(name)` maps to a 0..119 slot (6 rows × 20,
 row 0-5 of 20; side LEDs occupy the rest of the 120 slots).
+
+## G6 findings (10-15) — wireless 5092 has NO dongle tunnel
+CORE 2.1.22 handles our board via `GmmkSeries` (keyboard.ts:117: "GMMK PRO:
+0x320F0x5044 (alternate board: 0x320F0x5092)"). GmmkSeries.SetFeatureReport has
+ONLY plain `SetFeatureReport(devId, 0x07, 256/264, buf)` — the 4-segment
+F1F2F3/E0E1E2E3 dongle tunnel (report 0x00, 65 B, gated by GetDongleStatus
+F7 handshake) exists only in Gmmk3Series (GMMK3/Onix). Not our board.
+Also: CORE never READS the keymap back — connect flow pushes DB state only;
+GetFeatureReport(0x07) call sites = none in the device flows. The app is the
+source of truth; firmware is a slave. ⇒ blank GET mirror post-reset is the
+board's uninitialized shadow buffer, NOT proof the writes didn't land.
+⇒ physical keypress is the only true verification for slot-scoped writes.
+G6 live replay (39 factory reports: 0x08 open, 9×[0x03,0x04,0x09,LED],
+0x01 bind, 0x08 close) — all sent once, no errors. User-reported side effect:
+backlight went OFF (my hand-built LED cmd lacked the proven color/flags layout;
+restored via proven set_effect(4)/set_brightness(20)/set_speed(50) — PROOF the
+channel executes cmd 0x02). Key mappings kept working throughout.
