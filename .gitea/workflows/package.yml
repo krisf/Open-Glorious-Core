@@ -45,17 +45,17 @@ jobs:
           verification listener, factory-safe reset, app icon + dock integration."
           RELEASE_JSON=$(jq -n --arg tag "$TAG" --arg body "$BODY" \
             '{tag_name: $tag, name: $tag, body: $body, target_commitish: "main"}')
-          RID=$(curl -sf -X POST "$API/repos/$GITEA_REPOSITORY/releases" \
+          RID=$(curl -sf -X POST "$API/repos/krisf/open-glorious-core/releases" \
             -H "Authorization: token $RELEASE_TOKEN" \
             -H 'Content-Type: application/json' -d "$RELEASE_JSON" | jq -r .id)
           if [ "$RID" = "null" ] || [ -z "$RID" ]; then
-            RID=$(curl -sf "$API/repos/$GITEA_REPOSITORY/releases/tags/$TAG" \
+            RID=$(curl -sf "$API/repos/krisf/open-glorious-core/releases/tags/$TAG" \
               -H "Authorization: token $RELEASE_TOKEN" | jq -r .id)
           fi
           for f in dist/*; do
             NAME=$(basename "$f")
             echo "attaching $NAME"
-            curl -sf -X POST "$API/repos/$GITEA_REPOSITORY/releases/$RID/assets?name=$NAME" \
+            curl -sf -X POST "$API/repos/krisf/open-glorious-core/releases/$RID/assets?name=$NAME" \
               -H "Authorization: token $RELEASE_TOKEN" -F "attachment=@$f"
           done
           echo "release $TAG assets uploaded"
