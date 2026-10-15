@@ -13,12 +13,32 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication
 
-from .backend import BackendError, create_backend
+from .backend import (
+    KEYMAP_SLOTS,
+    KEYMAP_SLOT_LABELS,
+    KEYMAP_UNASSIGNED,
+    BackendError,
+    create_backend,
+)
 from .device import HidDevice, detect_gmmk_pro
+from .keycodes import all_assignable_codes, code_group, code_to_name, target_type
 
 STATIC_DIR = Path(__file__).with_name("static")
 ICON_PATH = STATIC_DIR / "assets" / "glorious-core.ico"
+DATA_DIR = Path(__file__).with_name("data")
 HOST = "127.0.0.1"
+
+# Keymap panel constants. The types table ships as the packaged factory
+# default and is used for UI type LABELS only (never written unless the types
+# file says so — writes send data/default_types.bin).
+KEYMAP_TYPE_LABELS = {0x01: "normal", 0x02: "modifier", 0x03: "consumer", 0xFF: "unused"}
+KEYMAP_PROFILES = (1, 2, 3)
+KEYMAP_LAYERS = (1, 2, 3)
+# Exact banner text the UI must show when the mirror is the blank shadow
+# buffer (G7 plan / PROTOCOL_DECODE.md G6: GUI shows factory defaults instead).
+KEYMAP_SHADOW_BANNER = "Device buffer not initialized — showing factory default"
+# Exact tooltip wording for non-active profile/layer cards.
+KEYMAP_SWITCH_HINT = "switch-profile first"
 
 
 def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
@@ -47,6 +67,15 @@ def _group_devices(devices: list[HidDevice]) -> list[dict[str, object]]:
 class OpenGloriousCoreWebController:
     def __init__(self) -> None:
         self.backend = create_backend()
+        # One HID conversation at a time: ThreadingHTTPServer hands every
+        # request its own thread, and the feature-report interface is a
+        # single shared device — never interleave report exchanges.
+        self._io_lock = threading.Lock()
+
+    def _backend_io(self, call, *args):
+        """Run one backend (HID-touching) call under the controller lock."""
+        with self._io_lock:
+            return call(*args)
 
     def get_state(self) -> dict[str, Any]:
         devices = detect_gmmk_pro()
@@ -70,7 +99,7 @@ class OpenGloriousCoreWebController:
             }
 
         try:
-            state = self.backend.read_state()
+            state = self._backend_io(self.backend.read_state)
         except BackendError as exc:
             return {
                 "ok": False,
@@ -102,26 +131,150 @@ class OpenGloriousCoreWebController:
             "colors": list(self.backend.COLOR_NAMES),
         }
 
+    def _default_types(self) -> bytes | None:
+        """Packaged factory types table, for UI type labels only (never
+        written by the panel; writes send it via the backend unchanged)."""
+        try:
+            return (DATA_DIR / "default_types.bin").read_bytes()
+        except OSError:
+            return None
+
+    def get_keystate(self) -> dict[str, Any]:
+        """Keymap panel state for the ACTIVE profile/layer (the GET config
+        mirror only exposes the active pair — remap/PROTOCOL_DECODE.md).
+
+        Shadow handling (G6 verdict): after a factory reset the mirror codes
+        table reads all-zero forever while writes physically land. That blank
+        table is NOT displayed: the panel shows the packaged factory defaults
+        (``default_keymap_table()``) with ``is_dirty_source`` set, and the UI
+        shows KEYMAP_SHADOW_BANNER.
+        """
+        devices = detect_gmmk_pro()
+        grouped_devices = _group_devices(devices)
+        if not devices:
+            return {
+                "ok": False,
+                "message": "No GMMK Pro detected in /sys/class/hidraw.",
+                "backend": self.backend.name,
+                "devices": [],
+                "keymap": None,
+            }
+        if not self.backend.is_available():
+            return {
+                "ok": False,
+                "message": self.backend.install_hint(),
+                "backend": self.backend.name,
+                "devices": grouped_devices,
+                "keymap": None,
+            }
+
+        profile = int(getattr(self.backend, "profile", 1))
+        layer = int(getattr(self.backend, "layer", 1))
+        try:
+            entries = self._backend_io(self.backend.read_keymap, profile, layer)
+            factory = self.backend.default_keymap_table()
+        except BackendError as exc:
+            return {
+                "ok": False,
+                "message": str(exc),
+                "backend": self.backend.name,
+                "devices": grouped_devices,
+                "keymap": None,
+            }
+
+        codes = [int(entry.scancode) for entry in entries]
+        is_dirty_source = all(code == 0x00 for code in codes)
+        source = "factory-default" if is_dirty_source else "device"
+        if is_dirty_source:
+            # Blank shadow buffer: display the packaged factory defaults.
+            codes = [int(byte) for byte in factory]
+
+        types = self._default_types()
+        slots = []
+        for entry in entries:
+            code = codes[entry.slot]
+            type_byte = types[entry.slot] if types is not None and entry.slot < len(types) else None
+            slots.append(
+                {
+                    "slot": entry.slot,
+                    "code": code,
+                    "code_name": code_to_name(code),
+                    "code_type_label": KEYMAP_TYPE_LABELS.get(type_byte, "reserved"),
+                    "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
+                    "is_unassigned": code == KEYMAP_UNASSIGNED,
+                    "factory_code": int(factory[entry.slot]),
+                }
+            )
+
+        can_switch = [
+            {
+                "profile": candidate_profile,
+                "layer": candidate_layer,
+                "active": (candidate_profile, candidate_layer) == (profile, layer),
+                "hint": (
+                    ""
+                    if (candidate_profile, candidate_layer) == (profile, layer)
+                    else KEYMAP_SWITCH_HINT
+                ),
+            }
+            for candidate_profile in KEYMAP_PROFILES
+            for candidate_layer in KEYMAP_LAYERS
+        ]
+
+        message = f"Keymap mirror read for profile {profile} layer {layer}."
+        if is_dirty_source:
+            message = (
+                f"{KEYMAP_SHADOW_BANNER} — writes land on the device, the mirror "
+                "cannot confirm them; physical key test is the only confirmation."
+            )
+        return {
+            "ok": True,
+            "message": message,
+            "backend": self.backend.name,
+            "devices": grouped_devices,
+            "keymap": {
+                "profile": profile,
+                "layer": layer,
+                "source": source,
+                "is_dirty_source": is_dirty_source,
+                "slots": slots,
+                "can_switch": can_switch,
+                "active_profile": profile,
+                "active_layer": layer,
+            },
+            # Remap-target catalog for the UI dropdown (group + type marker).
+            "codes": [
+                {
+                    "code": code,
+                    "name": code_to_name(code),
+                    "group": code_group(code),
+                    "target_type": target_type(code),
+                }
+                for code in all_assignable_codes()
+            ],
+        }
+
     def run_action(self, action: str, value: Any = None) -> dict[str, Any]:
         try:
             if action == "refresh":
                 return self.get_state()
             if action == "set_brightness":
-                message = self.backend.set_brightness(int(value), True)
+                message = self._backend_io(self.backend.set_brightness, int(value), True)
             elif action == "set_effect":
-                message = self.backend.set_effect(int(value), True)
+                message = self._backend_io(self.backend.set_effect, int(value), True)
             elif action == "set_speed":
-                message = self.backend.set_speed(int(value), True)
+                message = self._backend_io(self.backend.set_speed, int(value), True)
             elif action == "set_hue":
-                message = self.backend.set_hue(int(value), True)
+                message = self._backend_io(self.backend.set_hue, int(value), True)
             elif action == "set_saturation":
-                message = self.backend.set_saturation(int(value), True)
+                message = self._backend_io(self.backend.set_saturation, int(value), True)
             elif action == "set_color":
-                message = self.backend.set_color_name(str(value), True)
+                message = self._backend_io(self.backend.set_color_name, str(value), True)
             elif action == "set_custom_color":
                 if not isinstance(value, dict):
                     return {"ok": False, "message": "Custom color payload must be an object."}
-                message = self.backend.set_rgb_color(
+                message = self._backend_io(
+                    self.backend.set_rgb_color,
                     int(value.get("red", 0)),
                     int(value.get("green", 0)),
                     int(value.get("blue", 0)),
@@ -129,9 +282,45 @@ class OpenGloriousCoreWebController:
                     str(value.get("group")) if value.get("group") is not None else None,
                 )
             elif action == "save":
-                message = self.backend.save()
+                message = self._backend_io(self.backend.save)
             elif action == "device_indication":
-                message = self.backend.device_indication()
+                message = self._backend_io(self.backend.device_indication)
+            elif action == "apply-keymap":
+                raw = value.get("codes") if isinstance(value, dict) else None
+                if (
+                    not isinstance(raw, list)
+                    or len(raw) != KEYMAP_SLOTS
+                    or not all(
+                        isinstance(code, int)
+                        and not isinstance(code, bool)
+                        and 0 <= code <= 0xFF
+                        for code in raw
+                    )
+                ):
+                    return {
+                        "ok": False,
+                        "message": f"Keymap payload must carry {KEYMAP_SLOTS} integer codes (0-255).",
+                    }
+                profile = int(getattr(self.backend, "profile", 1))
+                layer = int(getattr(self.backend, "layer", 1))
+                message = self._backend_io(
+                    self.backend.set_keymap_codes, profile, layer, bytes(raw)
+                )
+            elif action == "reset-keymap":
+                profile = int(getattr(self.backend, "profile", 1))
+                layer = int(getattr(self.backend, "layer", 1))
+                message = self._backend_io(self.backend.reset_keymap, profile, layer)
+            elif action == "switch-profile":
+                if not isinstance(value, dict):
+                    return {"ok": False, "message": "Profile payload must be an object with profile and layer."}
+                try:
+                    profile = int(value.get("profile", 0))
+                    layer = int(value.get("layer", 0))
+                except (TypeError, ValueError):
+                    return {"ok": False, "message": "profile and layer must be integers."}
+                if profile not in KEYMAP_PROFILES or layer not in KEYMAP_LAYERS:
+                    return {"ok": False, "message": "profile and layer must be between 1 and 3."}
+                message = self._backend_io(self.backend.change_profile, profile, layer)
             else:
                 return {"ok": False, "message": f"Unknown action: {action}"}
         except BackendError as exc:
@@ -152,6 +341,9 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/api/state":
             self._send_json(self.controller.get_state())
+            return
+        if self.path == "/api/keystate":
+            self._send_json(self.controller.get_keystate())
             return
         if self.path == "/":
             self.path = "/index.html"
