@@ -324,3 +324,25 @@ fail-closed). All DEVICE TOUCHING in P1/P2/P3 is executed by the OPERATOR (Herme
 running the scripts DSH writes; DSH remains the author of ALL shipped code, tests,
 probe tooling, and analysis. Device-execution results (JSONL, hex dumps, smoke
 output) are saved by the operator into remap/ and referenced by DSH for analysis.
+
+---
+
+## INCIDENT + SCHEDULING NOTES (2026-10-15 ~01:05-01:50 UTC)
+
+While P1 batch 1 ran, the rig's serving stack experienced a cascade:
+1. `radiance-qfn` (vLLM :8180, DSH's model backend) died on a `0.0.0.0:8180` bind
+   collision with a stale Maple temp shim left holding the port (swap.sh had warned
+   about exactly this in its comments — the shim must die before any engine binds).
+2. Recovery cost DSH three aborted sessions (TRANSPORT connection errors at turn 1).
+3. Root cause of the port squat + double sweep: the dsh-swe-bench DeepSWE battery
+   (`run_dsh_swe_ab.sh`, driver started ~21:19 EDT, and its scheduled cron
+   `deepswear-3stack-ab-2026-10-15` = once @ 01:00 EDT) swaps engine configs per
+   task×stack via swap.sh — it evicted the live EXL3 stack twice mid-session.
+4. Resolution: battery driver + workers killed (partial results kept in
+   results/ab-2026-10-15.jsonl), maple temp shim killed, stale container removed,
+   EXL3 stack relaunched clean (3rd attempt, engine stable), and the 01:00 EDT
+   once-cron PAUSED via cronjob_manage with an audit reason. Resume or reschedule
+   it after the keyboard phases complete.
+
+Rule going forward: NO concurrent swapper may touch :8180 while a DSH phase is in
+flight — check `pgrep -af "swap.sh|temp_shim"` and the cron list before dispatch.
