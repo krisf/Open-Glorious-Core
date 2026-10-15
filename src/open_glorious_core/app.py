@@ -62,7 +62,16 @@ KEYMAP_BLANK_MIRROR_SIGNATURE = "no parsable profile/layer"
 #     ← ↓ →`; row-6 table lines 178-186 mark them `*(unassigned spare)*`
 #     with factory code 0xFF — verified against the packaged fixture
 #     data/default_keymap.bin: bytes 103/104/106/107/111 == 0xFF).
-NON_KEYCAP_SLOTS = frozenset({14, 72, 92, 103, 104, 106, 107, 111})
+#   * 55, 56, 57, 58, 59 — the head of the row-4 USB block, BEFORE Caps Lock
+#     (G10, the class G9 missed). KEYMAP_MAP.md lines 115-119: the row-3 table
+#     lists all five as `*(unassigned spare)*`, and the factory bytes agree —
+#     data/default_keymap.bin[55..59] are all 0xFF while the REAL CapsLock is
+#     slot 60 = 0x39 (KEYMAP_MAP.md line 125). Physical proof: an operator
+#     write of 0x59 to slot 58 via the GUI's "Caps Lock" cap landed
+#     (`ok: true`, one cmd 0x03 matrix) and did NOTHING on the board — no
+#     numpad-1 ever appeared at that position because there is NO keycap
+#     there (the user's dead-write test, G10_UI_TARGET_PLAN.md).
+NON_KEYCAP_SLOTS = frozenset({14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111})
 KEYMAP_BLANK_MIRROR_MESSAGE = (
     "Config mirror is blank (shadow buffer never populates on this wireless "
     "board post-factory-reset); showing packaged factory defaults. Writes "

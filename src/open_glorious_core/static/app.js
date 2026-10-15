@@ -525,22 +525,33 @@ if (els.flashButton) {
 
 // ---------------------------------------------------------------------------
 // Key remapping panel (G7). Talks to GET /api/keystate and the apply-keymap /
-// reset-keymap / switch-profile actions. The matrix is 6 rows x 20 slots;
-// columns 16-20 are firmware spares (never rendered). G9 FIX A: 8 of the
-// rendered slots carry NO physical keycap (per-slot `is_keycap` flag from
-// /api/keystate, app.NON_KEYCAP_SLOTS) and render as invisible spacers so the
-// 15-column row alignment is preserved — the grid stays 6 x 15.
+// reset-keymap / switch-profile actions. G10: the per-cap slot mapping is NO
+// LONGER a `row * stride + column` formula — every cap's slot number is read
+// from the row tables of keymap-slots.js (transcribed from
+// remap/KEYMAP_MAP.md): row 4's caps bind to slots 60-74 (Caps Lock = 60),
+// and the head-of-block 0xFF spares 55-59 sit in NO visual row, so the cap
+// labeled "Caps Lock" can never aim at a keycap-less spare (operator incident:
+// a GUI "Caps Lock" cap wrote slot 58 — a 0xFF spare with no physical key).
+// Slots that carry no keycap (NON_KEYCAP, per-slot `is_keycap` flag from
+// /api/keystate) render as invisible spacers so the 15-column row alignment
+// is preserved — the grid stays 6 x 15 cells.
 // ---------------------------------------------------------------------------
 
-const KEYMAP_ROWS = 6;
-const KEYMAP_COLS = 15;
-const KEYMAP_ROW_SLOTS = 20;
 const KEYMAP_SLOT_COUNT = 120;
-// Offline mirror of app.NON_KEYCAP_SLOTS (remap/KEYMAP_MAP.md: slots 14/72/92
-// matrix artifacts + the five row-6 `··` spacers 103/104/106/107/111). Used
-// only when no /api/keystate payload is loaded yet; the payload's per-slot
-// `is_keycap` flag is the source of truth.
-const KEYMAP_NON_KEYCAP = new Set([14, 72, 92, 103, 104, 106, 107, 111]);
+// The slot table ships as a classic script (keymap-slots.js, loaded before
+// app.js in index.html). It is the single source of truth for slot binding:
+// a missing table must NEVER fall back to an arithmetic guess (that class of
+// silent per-row offset IS the G10 defect) — the panel fails closed instead.
+const KEYMAP_TABLE = (typeof KEYMAP_SLOT_TABLE !== "undefined" && KEYMAP_SLOT_TABLE)
+  ? KEYMAP_SLOT_TABLE : null;
+const KEYMAP_COLS = KEYMAP_TABLE ? KEYMAP_TABLE.rows[0].slots.length : 15;
+// Offline mirror of app.NON_KEYCAP_SLOTS: matrix artifacts 14/72/92, the
+// head-of-block row-4 spares 55-59 and the five row-6 `··` spacers
+// 103/104/106/107/111 (remap/KEYMAP_MAP.md). Used only when no /api/keystate
+// payload is loaded yet; the payload's per-slot `is_keycap` flag wins.
+const KEYMAP_NON_KEYCAP = new Set(KEYMAP_TABLE
+  ? KEYMAP_TABLE.non_keycap_slots
+  : [14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111]);
 const KEYMAP_GROUP_ORDER = [
   "alpha", "numeric", "fkeys", "modifiers", "nav",
   "keypad", "media", "punct", "editing", "system", "intl", "vendor", "other",
@@ -711,16 +722,28 @@ function renderKeymapProfiles() {
 function renderKeymapGrid() {
   if (!km.grid) return;
   km.grid.innerHTML = "";
-  for (let row = 0; row < KEYMAP_ROWS; row += 1) {
-    for (let column = 0; column < KEYMAP_COLS; column += 1) {
-      const slot = row * KEYMAP_ROW_SLOTS + column;
+  if (!KEYMAP_TABLE) {
+    showKeymapProblem("Keymap slot table (keymap-slots.js) failed to load — no "
+      + "keycap is bound to any slot, so the grid stays empty. Reload the app.");
+    return;
+  }
+  // G10: iterate the KEYMAP_MAP.md row tables — every cap's slot number is a
+  // table cell, not a formula. The cap labeled "Caps Lock" binds to slot 60
+  // by construction, and slots in no visual row (55-59, 75-79, 95-99, ...)
+  // can never bind to a cap.
+  for (const row of KEYMAP_TABLE.rows) {
+    for (let column = 0; column < row.slots.length; column += 1) {
+      const slot = row.slots[column];
+      const capName = row.keys[column];
       const meta = keymapSlotMeta(slot);
       // G9 FIX A: per-slot is_keycap from the payload (source of truth),
-      // mirrored offline by KEYMAP_NON_KEYCAP. A slot without a keycap is an
-      // INVISIBLE spacer: no border/background/label, not clickable, not
-      // tabbable — it only preserves the 15-column row alignment. Raw
-      // "#NNN" names never render anywhere.
-      const noKeycap = meta ? meta.is_keycap === false : KEYMAP_NON_KEYCAP.has(slot);
+      // mirrored offline by the table's null key name / KEYMAP_NON_KEYCAP. A
+      // slot without a keycap is an INVISIBLE spacer: no border/background/
+      // label, not clickable, not tabbable — it only preserves the 15-column
+      // row alignment. Raw "#NNN" names never render anywhere.
+      const noKeycap = meta
+        ? meta.is_keycap === false
+        : (capName === null || KEYMAP_NON_KEYCAP.has(slot));
       if (noKeycap) {
         const spacer = document.createElement("div");
         spacer.className = "keycap-spacer";
@@ -737,7 +760,7 @@ function renderKeymapGrid() {
       button.classList.toggle("is-dirty", dirty);
       button.classList.toggle("is-selected", keymap.selectedSlot === slot);
       button.dataset.slot = String(slot);
-      const label = (meta && meta.physical) || "";
+      const label = (meta && meta.physical) || capName || "";
       const labelEl = document.createElement("span");
       labelEl.className = "keycap-label";
       labelEl.textContent = label;
