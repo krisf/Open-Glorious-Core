@@ -314,3 +314,13 @@ manual UI test (user clicks through the real app on the rig); keyboard alive.
 6. **Open question for the user:** if P1 fails to find the write command — would they
    accept a capture-by-comparison session (install CORE in a VM, capture USB during
    one remap, us decode it) as the escalation, or prefer the uinput fallback?
+
+---
+
+## OPERATOR AMENDMENT (2026-10-14, G1 discovery): device execution split
+
+DSH's sandbox has no /dev/hidraw* (minimal /dev in its mount namespace; sysfs only,
+fail-closed). All DEVICE TOUCHING in P1/P2/P3 is executed by the OPERATOR (Hermes)
+running the scripts DSH writes; DSH remains the author of ALL shipped code, tests,
+probe tooling, and analysis. Device-execution results (JSONL, hex dumps, smoke
+output) are saved by the operator into remap/ and referenced by DSH for analysis.
