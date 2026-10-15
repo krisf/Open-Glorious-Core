@@ -110,15 +110,14 @@ function keyEntryMatches(entry, query) {
 // [PURE-SEARCH-END]
 
 // [PURE-DRAWER-START]
-// Pure, DOM-free drawer logic (G10 FIX 4, G11 refinement). Extracted verbatim
+// Pure, DOM-free drawer logic (G10 FIX 4, refined G17). Extracted verbatim
 // between these markers and unit-tested headlessly by tests/test_keymap_slots_js.py (node).
 // A slot whose FACTORY code is 0xFF is an unassigned matrix slot per the
 // VENDOR table: the drawer shows the unassigned note INSTEAD of the normal
-// editor for it. G11 exception: `slotHasKeycap === true` means the human-
-// confirmed board map puts a physical keycap on this slot — the firmware wins
-// over the vendor table (the operator's WB5092 firmware has CapsLock at slot
-// 58, whose factory byte is 0xFF; hiding the editor there would make the
-// Caps Lock cap un-remappable).
+// editor for it. `slotHasKeycap === true` means the board map puts a physical
+// keycap on this slot — it wins over the vendor's 0xFF, so a factory-0xFF cell
+// that carries a real cap (the head-of-block spares are NOT caps; Caps Lock
+// sits at slot 60 with factory 0x39, G13 sweep/G17) stays editable.
 function keycapSlotIsUnassigned(meta, slotHasKeycap) {
   if (!meta) return false;
   if (slotHasKeycap === true) return false;
@@ -542,15 +541,15 @@ if (els.flashButton) {
 
 // ---------------------------------------------------------------------------
 // Key remapping panel (G7). Talks to GET /api/keystate and the apply-keymap /
-// reset-keymap / switch-profile actions. G10/G11: the per-cap slot mapping is
+// reset-keymap / switch-profile actions. G10: the per-cap slot mapping is
 // NO LONGER a `row * stride + column` formula — every cap's slot number is
-// read from the row tables of keymap-slots.js. G11 empirical-firmware fix:
-// the cap labeled "Caps Lock" binds to slot 58 on the operator's WB5092
-// firmware (operator-confirmed; the vendor Buttoninfo_Default says 60 and the
-// firmware refutes it — the factory vector's 0xFF at 58 killed CapsLock, a
-// recovery 0x39@58 restored it). The cells 55, 56, 57, 59 and 60 (the
-// vendor-table caps duplicate) have no empirical identity, sit in NO visual
-// row, and can never bind to a cap. Slots that carry no keycap (NON_KEYCAP,
+// read from the row tables of keymap-slots.js. G17 (retracting the G11
+// "empirical slot 58" claim): the cap labeled "Caps Lock" binds to slot 60 —
+// the vendor Buttoninfo_Default's own CapsLock cell, sweep-confirmed on the
+// operator's WB5092 firmware (G13: F13@58 + F14@60 written, a caps press
+// emitted 00 00 69 twice on the OS listener, nothing from 58). The head cells
+// 55, 56, 57, 58, 59 (factory 0xFF, 58 among them) sit in NO visual row and
+// can never bind to a cap. Slots that carry no keycap (NON_KEYCAP,
 // per-slot `is_keycap` flag from /api/keystate) render as invisible spacers so
 // the 15-column row alignment is preserved — the grid stays 6 x 15 cells.
 // ---------------------------------------------------------------------------
@@ -564,14 +563,15 @@ const KEYMAP_TABLE = (typeof KEYMAP_SLOT_TABLE !== "undefined" && KEYMAP_SLOT_TA
   ? KEYMAP_SLOT_TABLE : null;
 const KEYMAP_COLS = KEYMAP_TABLE ? KEYMAP_TABLE.rows[0].slots.length : 15;
 // Offline mirror of app.NON_KEYCAP_SLOTS: matrix artifacts 14/72/92, the
-// hidden row-4 head cells 55/56/57/59 + 60 (G11: empirical CapsLock is slot
-// 58; 60 is the vendor-table caps duplicate with no empirical identity) and
-// the five row-6 `··` spacers 103/104/106/107/111 (remap/KEYMAP_MAP.md).
+// hidden row-4 head cells 55/56/57/58/59 (G17: slot 58 is one of these dead
+// spares — the G11 "CapsLock at 58" claim is retracted; Caps Lock is slot 60
+// and renders as a keycap) and the five row-6 `··` spacers 103/104/106/107/111
+// (remap/KEYMAP_MAP.md).
 // Used only when no /api/keystate payload is loaded yet; the payload's
 // per-slot `is_keycap` flag wins.
 const KEYMAP_NON_KEYCAP = new Set(KEYMAP_TABLE
   ? KEYMAP_TABLE.non_keycap_slots
-  : [14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111]);
+  : [14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111]);
 const KEYMAP_GROUP_ORDER = [
   "alpha", "numeric", "fkeys", "modifiers", "nav",
   "keypad", "media", "punct", "editing", "system", "intl", "vendor", "other",
@@ -832,10 +832,10 @@ function renderKeymapGrid() {
       + "keycap is bound to any slot, so the grid stays empty. Reload the app.");
     return;
   }
-  // G10/G11: iterate the KEYMAP_MAP.md row tables + EMPIRICAL-FIRMWARE note —
+  // G10 + G17: iterate the KEYMAP_MAP.md row tables + its SWEEP-VERDICT note —
   // every cap's slot number is a table cell, not a formula. The cap labeled
-  // "Caps Lock" binds to slot 58 (the operator-verified CapsLock cell on this
-  // firmware) by construction, and slots in no visual row (55, 56, 57, 59, 60,
+  // "Caps Lock" binds to slot 60 (the vendor table's CapsLock cell, confirmed
+  // by the G13 sweep) by construction, and slots in no visual row (55-59,
   // 75-79, 95-99, ...) can never bind to a cap.
   for (const row of KEYMAP_TABLE.rows) {
     for (let column = 0; column < row.slots.length; column += 1) {
@@ -876,7 +876,7 @@ function renderKeymapGrid() {
       codeEl.textContent = keymapCodeShort(code);
       button.append(labelEl, codeEl);
       // G15: the tooltip shows the EFFECTIVE type the firmware honors
-      // (payload type_name), and flags the empirically-alive cells.
+      // (payload type_name), and flags the cells whose type activates them.
       button.title = `Slot ${slot} · ${keymapCodeName(code)}`
         + (meta ? ` · ${meta.type_name ?? meta.code_type_label}` : "")
         + (meta && meta.cell_active ? " · cell active" : "")
@@ -969,11 +969,11 @@ function renderKeymapEditor() {
   toggleHidden(km.editor, false);
   const meta = keymapSlotMeta(slot);
   setText(km.editorTitle, `${(meta && meta.physical) || "Keycap"} · slot ${slot}`);
-  // G10 FIX 4 + G11: a factory-0xFF slot is "unassigned" per the VENDOR table.
+  // G10 FIX 4 + G17: a factory-0xFF slot is "unassigned" per the VENDOR table.
   // Keycap presence answers from the payload's is_keycap (grid and
-  // /api/keystate agree), mirrored offline by the slot table — an empirically
-  // confirmed keycap (Caps Lock at slot 58, factory byte 0xFF) always gets the
-  // normal editor; the hidden cells 55/56/57/59/60 have no cap at all, so the
+  // /api/keystate agree), mirrored offline by the slot table — a real keycap
+  // always gets the normal editor (Caps Lock heads row 4 at slot 60, factory
+  // byte 0x39), and the hidden head cells 55-59 have no cap at all, so the
   // honest unassigned note remains the backstop for anything keycap-less.
   const slotHasKeycap = meta
     ? meta.is_keycap !== false

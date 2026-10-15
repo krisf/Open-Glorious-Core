@@ -16,15 +16,11 @@ from PySide6.QtWidgets import QApplication
 
 from . import lastgood
 from .backend import (
-    EMPIRICAL_CAPS_CODE,
-    EMPIRICAL_CAPS_SLOT,
-    EMPIRICAL_CAPS_TYPE,
     KEYMAP_SLOTS,
     KEYMAP_SLOT_LABELS,
     KEYMAP_UNASSIGNED,
     BackendError,
     KeymapEntry,
-    apply_empirical_overlay,
     create_backend,
 )
 from .device import HidDevice, detect_gmmk_pro
@@ -48,7 +44,9 @@ HOST = "127.0.0.1"
 # a 0xFF-typed cell ignores its code byte entirely, so an assigned cell with
 # the vendor 0xFF default type is a cell that does nothing (operator proof,
 # G15_TYPES_OVERLAY_PLAN.md: the GUI write codes[58]=0x54 with implicit 0xFF
-# did nothing; the manual recovery write with types[58]=0x01 landed).
+# did nothing; the manual recovery write with types[58]=0x01 landed — the
+# types overlay mechanism, E2E-pinned; the caps→NumpadDivide cell of that
+# incident is slot 60 per the G13 sweep, G17).
 KEYMAP_TYPE_LABELS = {0x01: "normal", 0x02: "modifier", 0x03: "consumer", 0xFF: "unused"}
 KEYMAP_TYPE_NORMAL = 0x01
 KEYMAP_TYPE_MODIFIER = 0x02
@@ -71,8 +69,9 @@ def build_effective_types(codes: bytes, default_types: bytes) -> bytes:
     * slots whose default type is 0x01/0x02/0x03 are NEVER touched — that
       protects the knob's 0x03 consumer typing and the vendor modifier set;
     * any slot the vendor leaves 0xFF ("unassigned") whose effective code is
-      non-0xFF becomes 0x01 (normal key) — this is what activates the
-      empirical CapsLock cell 58 and every GUI-assigned spare;
+      non-0xFF becomes 0x01 (normal key) — this is what activates every
+      GUI-assigned spare (the factory CapsLock cell 60 is already type 0x01,
+      so a plain factory vector needs no activation at all);
     * a slot assigned a modifier code (0xE0–0xE7) becomes 0x02, matching the
       vendor modifier typing;
     * an unassigned slot (code 0xFF) keeps the vendor type byte.
@@ -114,18 +113,16 @@ KEYMAP_BLANK_MIRROR_SIGNATURE = "no parsable profile/layer"
 #     ← ↓ →`; row-6 table lines 178-186 mark them `*(unassigned spare)*`
 #     with factory code 0xFF — verified against the packaged fixture
 #     data/default_keymap.bin: bytes 103/104/106/107/111 == 0xFF).
-#   * 55, 56, 57, 59 — the head of the row-4 USB block, BEFORE Caps Lock:
-#     factory 0xFF cells with no empirical identity (KEYMAP_MAP.md lines
-#     115-119; data/default_keymap.bin[55..57,59] are 0xFF).
-#   * 60 — the vendor Buttoninfo_Default's CapsLock cell (factory 0x39). G11
-#     operator proof on this WB5092 firmware (320F:5092, 2026-10-15): the
-#     physical CapsLock cell is slot 58 — pushing the factory vector (0xFF at
-#     58) killed CapsLock and a recovery write of 0x39 to 58 restored it,
-#     while every write aimed at 60 did nothing. Slot 60 therefore has no
-#     empirical identity: it carries a harmless duplicate 0x39, is hidden from
-#     the grid like the 55/56/57/59 cells, and must NOT be touched without an
-#     operator-confirmed plan.
-NON_KEYCAP_SLOTS = frozenset({14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111})
+#   * 55, 56, 57, 58, 59 — the head of the row-4 USB block, BEFORE Caps Lock:
+#     factory 0xFF cells that carry no keycap (KEYMAP_MAP.md lines 115-119;
+#     data/default_keymap.bin[55..59] are 0xFF). G17 RETRACTS the G11 claim
+#     that slot 58 is this board's CapsLock cell: the G13 cell sweep wrote F13
+#     (0x68) to 58 and F14 (0x69) to 60, and a Caps Lock press emitted
+#     `00 00 69` twice on the OS listener with nothing from 58 — Caps Lock
+#     scans at slot 60 (the vendor table's own CapsLock cell), so 58 is an
+#     ordinary dead spare of the head-of-block group and is hidden exactly
+#     like its neighbours. Slot 60 is a REAL keycap now (grid head of row 4).
+NON_KEYCAP_SLOTS = frozenset({14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111})
 KEYMAP_BLANK_MIRROR_MESSAGE = (
     "Config mirror is blank (shadow buffer never populates on this wireless "
     "board post-factory-reset); showing packaged factory defaults. Writes "
@@ -204,7 +201,7 @@ KEY_EVENT_CODE_VARIANTS: dict[int, tuple[str, ...]] = {
     0x32: ("IntlBackslash",), 0x33: ("Semicolon",), 0x34: ("Quote",),
     0x35: ("Backquote",), 0x36: ("Comma",), 0x37: ("Period",),
     0x38: ("Slash",),
-    0x39: ("CapsLock",),  # the empirical slot-58 cell's own code
+    0x39: ("CapsLock",),  # CapsLock's own code (slot 60, G13 sweep)
     0x3A: ("F1",), 0x3B: ("F2",), 0x3C: ("F3",), 0x3D: ("F4",),
     0x3E: ("F5",), 0x3F: ("F6",), 0x40: ("F7",), 0x41: ("F8",),
     0x42: ("F9",), 0x43: ("F10",), 0x44: ("F11",), 0x45: ("F12",),
@@ -311,9 +308,10 @@ def build_matrix_self_test_report(
         "MATRIX SELF-TEST — read-only scan of the config mirror (GET only, "
         "ZERO writes).",
         f"Source: {source_label}",
-        "G11 empirical firmware truth (WB5092, operator-verified): CapsLock = "
-        "slot 58; the vendor table (58=0xFF, 60=0x39) is wrong — a live 0x39 "
-        "at 58 is the working caps cell, NOT a deviation.",
+        "G13 sweep verdict (operator-verified 2026-10-15, G17): CapsLock = "
+        "slot 60 — the vendor table's OWN CapsLock cell (factory 0x39). The "
+        "G11 'empirical slot 58' claim is RETRACTED: F13@58 + F14@60 written, "
+        "caps press emitted 00 00 69 twice, nothing from 58.",
     ]
     lines.extend(f"NOTE: {note}" for note in notes)
     lines.append("")
@@ -334,13 +332,11 @@ def build_matrix_self_test_report(
     lines.append("")
     lines.append("Keycap-less slots (never rendered, bound to NO cap):")
     lines.append("  14, 72, 92                 matrix artifacts (KEYMAP_MAP.md 32-42)")
-    lines.append("  55, 56, 57, 59             head of row-4 block, factory 0xFF, "
-                 "no empirical identity — dead-write cells (G10)")
-    lines.append("  60                         vendor-table caps cell (factory 0x39): "
-                 "duplicate caps, no empirical identity — hidden, G11; do not touch "
-                 "without an operator-confirmed plan")
+    lines.append("  55, 56, 57, 58, 59         head of row-4 block, factory 0xFF — dead "
+                 "spare cells (G13 sweep: 58 emits nothing; the G11 caps@58 claim is "
+                 "retracted)")
     lines.append("  103, 104, 106, 107, 111   row-6 spacers, factory 0xFF")
-    hidden_no_cap = (55, 56, 57, 59, 60)
+    hidden_no_cap = (55, 56, 57, 58, 59)
     bound_hidden = any(
         slot in hidden_no_cap
         for row in SLOT_TABLE["rows"]
@@ -348,7 +344,7 @@ def build_matrix_self_test_report(
         if key is not None
     )
     lines.append(
-        f"Caps bound: {SELF_TEST_CAPS_BOUND}; slots 55-57, 59, 60 bound to a "
+        f"Caps bound: {SELF_TEST_CAPS_BOUND}; slots 55-59 bound to a "
         f"cap: {'YES — DEFECT' if bound_hidden else 'NO'}"
     )
     lines.append(
@@ -856,28 +852,17 @@ class OpenGloriousCoreWebController:
             codes = [int(byte) for byte in factory]
 
         types = self._default_types()
-        # G12 item 6: display overlay for the EMPIRICAL caps cell. The vendor
-        # factory byte at slot 58 is 0xFF, so the factory-default degradation
-        # rendered slot 58 as "Unassigned (0xFF) · unused" while the operator
-        # keycap there is Caps Lock — the exact misreading that hid the G11
-        # kill. Source: remap/KEYMAP_MAP.md "EMPIRICAL-FIRMWARE" (G11,
-        # operator-verified: physical CapsLock cell = slot 58, code 0x39,
-        # type 0x01). Overlay scope is honest and narrow: the CODE overlay
-        # applies ONLY to the factory-defaults display path (is_dirty_source);
-        # a real device byte (e.g. 0x59 after a remap, or a genuine 0xFF =
-        # dead cell) is displayed as reported. default_keymap.bin is NOT
-        # rewritten — this is a display overlay plus the write overlay in
-        # reset_keymap.
-        display_codes = list(codes)
-        if is_dirty_source:
-            display_codes, _ = apply_empirical_overlay(
-                bytes(codes), types if types is not None else bytes(KEYMAP_SLOTS)
-            )
+        # G17 (retracts G12 item 6): NO display overlay. The G13 cell sweep
+        # put CapsLock on slot 60, where the packaged factory table already
+        # carries 0x39 · normal — the factory-defaults degradation renders
+        # the caps cell honestly on the raw vendor bytes; the slot-58 overlay
+        # covered a claim the sweep refuted.
         # G15 item 2: the panel reports the EFFECTIVE types — the same
-        # overlay apply-keymap writes — not the raw vendor table. Slot 58
-        # (code 0x39, vendor type 0xFF) shows type "normal", matching what
-        # the firmware will actually honor; type_name + cell_active give the
-        # UI the label and the "cell active" boolean directly.
+        # overlay apply-keymap writes. Slot 60 (code 0x39, vendor type 0x01)
+        # shows type "normal", matching what the firmware honors;
+        # type_name + cell_active give the UI the label and the "cell active"
+        # boolean directly.
+        display_codes = list(codes)
         display_types = (
             build_effective_types(bytes(display_codes), types)
             if types is not None
@@ -905,13 +890,6 @@ class OpenGloriousCoreWebController:
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
-                    "overlay": (
-                        "empirical-caps (remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE)"
-                        if is_dirty_source and entry.slot == EMPIRICAL_CAPS_SLOT
-                        and code == EMPIRICAL_CAPS_CODE
-                        and int(factory[entry.slot]) != EMPIRICAL_CAPS_CODE
-                        else None
-                    ),
                     # G9 FIX A + G10: False for the 13 matrix positions that
                     # carry no keycap (see NON_KEYCAP_SLOTS, incl. the
                     # head-of-block spares 55-59). The UI renders those as
@@ -1088,9 +1066,9 @@ class OpenGloriousCoreWebController:
                 raw_bytes = bytes(raw)
                 # G15: the GUI payload carries CODES only; pairing them with
                 # the packaged vendor types verbatim leaves every assigned
-                # 0xFF-type slot (the empirical caps cell 58 above all)
-                # INACTIVE — the firmware honors the type byte as cell
-                # activation. Send the effective types overlay explicitly.
+                # 0xFF-type slot INACTIVE — the firmware honors the type byte
+                # as cell activation. Send the effective types overlay
+                # explicitly.
                 default_types = self._default_types()
                 effective_types = (
                     build_effective_types(raw_bytes, default_types)

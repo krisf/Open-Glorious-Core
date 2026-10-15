@@ -61,38 +61,14 @@ KEYMAP_CODES_OFFSET = 0x80
 CODES_TABLE_ANCHOR = bytes((0x29, 0x3A, 0x3B, 0x3C))
 REPORT_ID_ECHO = 0x07
 
-# G12 — EMPIRICAL caps overlay (source: remap/KEYMAP_MAP.md "EMPIRICAL-FIRMWARE"
-# note, operator-verified 2026-10-15 on the WB5092 firmware, 320F:5092): the
-# physical CapsLock cell is slot 58, NOT the vendor Buttoninfo_Default's 60.
-# Pushing the raw vendor vector (0xFF @58) PHYSICALLY KILLED CapsLock (the G11
-# incident); the recovery write that restored it is 0x39 @58 with type 0x01.
-# Every factory reset must therefore apply this overlay, so a reset can never
-# repeat that kill. The packaged data files keep the vendor bytes — the
-# overlay is write- and display-side only (G12 plan item 6: do NOT rewrite
-# default_keymap.bin).
-EMPIRICAL_CAPS_SLOT = 58
-EMPIRICAL_CAPS_CODE = 0x39
-EMPIRICAL_CAPS_TYPE = 0x01
-EMPIRICAL_OVERLAY_CODES = {EMPIRICAL_CAPS_SLOT: EMPIRICAL_CAPS_CODE}
-EMPIRICAL_OVERLAY_TYPES = {EMPIRICAL_CAPS_SLOT: EMPIRICAL_CAPS_TYPE}
-
-
-def apply_empirical_overlay(
-    codes: bytes | bytearray, types: bytes | bytearray
-) -> tuple[bytes, bytes]:
-    """Return (codes, types) with the EMPIRICAL-FIRMWARE caps cell applied.
-
-    Only slot 58 changes (0x39 / type 0x01); every other byte is passed
-    through untouched. Used by ``reset_keymap`` (write overlay) and the GUI
-    display (G12 plan item 6)."""
-    overlaid_codes = bytearray(codes)
-    overlaid_types = bytearray(types)
-    for slot, code in EMPIRICAL_OVERLAY_CODES.items():
-        overlaid_codes[slot] = code
-    for slot, type_byte in EMPIRICAL_OVERLAY_TYPES.items():
-        overlaid_types[slot] = type_byte
-    return bytes(overlaid_codes), bytes(overlaid_types)
-
+# G17: the G12 "EMPIRICAL caps overlay" (0x39 + type 0x01 at slot 58) is
+# REMOVED. The G13 cell sweep (F13 0x68 @58 + F14 0x69 @60 written via the GUI,
+# then a Caps Lock press → hidraw emitted 00 00 69 twice, nothing from 58)
+# proved the physical CapsLock cell is slot 60 — exactly where the vendor
+# Buttoninfo_Default already puts 0x39 with type 0x01. The factory vector is
+# therefore caps-complete as shipped: a plain factory write restores CapsLock
+# (G11's slot-58 claim was a misattribution — the morning recovery wrote 0x39
+# to BOTH cells and the board answered via 60).
 
 def locate_codes_table(response: bytes | bytearray) -> int:
     """Offset of the 120-byte codes table inside a GET config-mirror response.
@@ -124,13 +100,13 @@ def locate_codes_table(response: bytes | bytearray) -> int:
     return KEYMAP_OFFSET + echo
 
 # slot -> physical key name for the GMMK Pro 75 % board (full derivation:
-# remap/KEYMAP_MAP.md + its EMPIRICAL-FIRMWARE note). Slots 14 / 72 / 92 carry
+# remap/KEYMAP_MAP.md + its SWEEP-VERDICT note). Slots 14 / 72 / 92 carry
 # non-FF raw bytes in the factory dump but have no confirmed keycap on this unit
-# and are deliberately unlabeled. G11: Caps Lock sits at slot 58 — the
-# operator-confirmed CapsLock cell on the WB5092 firmware; the vendor
-# Buttoninfo_Default puts 0x39 at 60 and is WRONG here, so 60 keeps no label:
-# no empirical identity, a hidden duplicate 0x39 — do not touch without an
-# operator-confirmed plan.
+# and are deliberately unlabeled. G17 (retracting G11): Caps Lock sits at slot
+# 60 — the vendor Buttoninfo_Default's OWN cell for it (0x39, type 0x01), now
+# sweep-confirmed on the operator's WB5092 firmware (the G13 F14 capture).
+# Slot 58 is a dead matrix spare among the row-4 head cells 55-59 (factory
+# 0xFF, no keycap); it carries no label and is hidden from the grid.
 KEYMAP_SLOT_LABELS: dict[int, str] = {
     **{0: "Esc"},
     **{i: f"F{i}" for i in range(1, 13)},
@@ -147,7 +123,7 @@ KEYMAP_SLOT_LABELS: dict[int, str] = {
     52: "RBracket",
     53: "Backslash",
     54: "PageUp",
-    58: "Caps Lock",
+    60: "Caps Lock",
     **{61 + i: c for i, c in enumerate("ASDFGHJKL")},
     70: "Semicolon",
     71: "Quote",
@@ -581,8 +557,8 @@ class StockGmmkProBackend(BaseBackend):
         )
 
     def reset_keymap(self, profile: int = 1, layer: int = 1) -> str:
-        """Restore factory defaults: packaged default codes + default types,
-        with the G12 EMPIRICAL caps overlay applied.
+        """Restore factory defaults: the packaged vendor codes + vendor types,
+        byte for byte, with no overlay.
 
         There is no dedicated reset command: "reset" means writing the captured
         factory table back with the same cmd-0x03 matrix write, using the
@@ -591,19 +567,17 @@ class StockGmmkProBackend(BaseBackend):
         read first so a write to a NON-active profile/layer is refused (G8: a
         fully blank shadow mirror is the shadow-only state — never refused).
 
-        G12 (plan item 5): the factory vector is written through
-        ``apply_empirical_overlay`` — codes[58]=0x39, types[58]=0x01 — the
-        operator-verified recovery recipe from remap/KEYMAP_MAP.md
-        "EMPIRICAL-FIRMWARE". The RAW vendor bytes (0xFF @58) physically kill
-        CapsLock on this firmware (G11 incident), so a factory reset that
-        skipped the overlay would repeat that kill; this pin is regression-
-        pinned by the G12 E2E test.
+        G17 (retracts G12 item 5): the G13 cell sweep proved the CapsLock cell
+        is slot 60, where the shipped factory table ALREADY carries 0x39 with
+        type 0x01, and the post-sweep factory restore brought CapsLock back on
+        the live board. The raw vendor vector is caps-complete, so the G12
+        "empirical" overlay at slot 58 (0x39 + type 0x01) is dead code against
+        a dead spare and is gone: a reset is the plain vendor factory table.
         """
         # Shadow-tolerant active-slot guard + device presence (G8).
         self._read_config_mirror_shadow_tolerant(profile, layer)
-        codes, types = apply_empirical_overlay(
-            self._default_keymap_table(), self._default_types()
-        )
+        codes = self._default_keymap_table()
+        types = self._default_types()
         shadow = self._write_keymap_matrix(codes, types, profile, layer)
         if shadow:
             return self._shadow_write_message("the factory default keymap", profile, layer)

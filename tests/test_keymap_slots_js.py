@@ -1,11 +1,12 @@
-"""G10/G11 — headless node tests for static/keymap-slots.js (the cap→slot table).
+"""G10/G17 — headless node tests for static/keymap-slots.js (the cap→slot table).
 
 The table module is DOM-free by contract (loaded as a classic script, required
 by node in tests). This harness runs it under the pinned node binary and pins
-the operator-confirmed facts: the cap labeled "Caps Lock" resolves to the
-empirical CapsLock slot 58 (G11 — the WB5092 firmware, not the vendor table),
-the hidden cells 55/56/57/59/60 are bound to nothing, and the clickable set is
-exactly the 82 physical keycaps. No Qt, no browser, no device I/O.
+the sweep-confirmed facts: the cap labeled "Caps Lock" resolves to slot 60 (the
+vendor table's own CapsLock cell, confirmed by the G13 cell sweep; G17 retracts
+the G11 slot-58 claim), the hidden head cells 55-59 (dead spare 58 included)
+are bound to nothing, and the clickable set is exactly the 82 physical
+keycaps. No Qt, no browser, no device I/O.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ APP_JS = ROOT / "src" / "open_glorious_core" / "static" / "app.js"
 INDEX_HTML = ROOT / "src" / "open_glorious_core" / "static" / "index.html"
 PINNED_NODE = "/home/ubuntu/.hermes/tools/node-26.7.0-linux-x64/bin/node"
 
-NON_KEYCAP = [14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111]
+NON_KEYCAP = [14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111]
 
 
 def _node() -> str:
@@ -54,27 +55,27 @@ def test_slot_table_module_is_dom_free() -> None:
 
 def test_module_loads_under_node() -> None:
     assert _eval("t.rows.length") == 6
-    assert _eval("t.rows[3].slots[0]") == 58  # row 4 starts at the empirical CapsLock slot
+    assert _eval("t.rows[3].slots[0]") == 60  # row 4 starts at the CapsLock slot (G17)
     assert _eval("t.rows[3].keys[0]") == "Caps Lock"
 
 
-def test_caps_lock_cap_resolves_to_empirical_slot_58() -> None:
-    assert _eval('t.slotForCapLabel("Caps Lock")') == 58
-    # The G11 empirical fact (operator-confirmed on WB5092 firmware): the
-    # CapsLock cell is 58 — the vendor table's 60 is a hidden duplicate.
-    assert _eval("t.allVisualSlots().indexOf(58) !== -1") is True
-    assert _eval("t.capName(58)") == "Caps Lock"
-    assert _eval("t.isNonKeycap(58)") is False
-    # Slot 60 (vendor 0x39 duplicate) resolves to NO cap and lives in no row.
-    assert _eval("t.allVisualSlots().indexOf(60) === -1") is True
-    assert _eval("t.capName(60)") is None
-    assert _eval("t.isNonKeycap(60)") is True
+def test_caps_lock_cap_resolves_to_sweep_confirmed_slot_60() -> None:
+    assert _eval('t.slotForCapLabel("Caps Lock")') == 60
+    # The G13 sweep verdict (G17): the CapsLock cell is slot 60, the vendor
+    # table's own cell — caps press emitted 00 00 69, nothing from 58.
+    assert _eval("t.allVisualSlots().indexOf(60) !== -1") is True
+    assert _eval("t.capName(60)") == "Caps Lock"
+    assert _eval("t.isNonKeycap(60)") is False
+    # Slot 58 (dead matrix spare) resolves to NO cap and lives in no row.
+    assert _eval("t.allVisualSlots().indexOf(58) === -1") is True
+    assert _eval("t.capName(58)") is None
+    assert _eval("t.isNonKeycap(58)") is True
     assert _eval("t.slotForCapLabel('Slot 58')") is None
 
 
 def test_head_of_block_spares_excluded() -> None:
     visual = set(_eval("t.allVisualSlots()"))
-    assert not visual & {55, 56, 57, 59, 60}
+    assert not visual & {55, 56, 57, 58, 59}
     assert _eval("t.non_keycap_slots") == NON_KEYCAP
 
 
@@ -90,7 +91,7 @@ def test_triple_confirmed_slots_in_node(slot: int, name: str) -> None:
 def test_clickable_set_is_82_unique_physical_caps() -> None:
     clickable = _eval("t.clickableSlots()")
     assert len(clickable) == len(set(clickable)) == 82, "no two caps share a slot"
-    assert 58 in clickable, "the empirical CapsLock cap (slot 58) must be clickable"
+    assert 60 in clickable, "the CapsLock cap (slot 60) must be clickable"
     for slot in NON_KEYCAP:
         assert slot not in clickable
     assert _eval("t.clickableSlots().slice().sort((a, b) => a - b)[0]") == 0
@@ -142,8 +143,9 @@ def test_unassigned_predicate_flags_factory_0xff_slots() -> None:
     assert _eval_drawer("keycapSlotIsUnassigned({factory_code: 0x39})") is False
     assert _eval_drawer("keycapSlotIsUnassigned(null)") is False
     assert _eval_drawer("keycapSlotIsUnassigned({})") is False
-    # G11: an operator-confirmed keycap overrides the vendor 0xFF — the
-    # Caps Lock cap at slot 58 (factory byte 0xFF) must stay editable.
+    # G17: a real keycap overrides the vendor 0xFF — the predicate's override
+    # path (slotHasKeycap === true) stays; Caps Lock itself now lives at slot
+    # 60 with factory byte 0x39, so it is editable on the plain vendor byte.
     assert _eval_drawer("keycapSlotIsUnassigned({factory_code: 0xFF}, true)") is False
     # A keycap-less 0xFF cell keeps the honest unassigned note.
     assert _eval_drawer("keycapSlotIsUnassigned({factory_code: 0xFF}, false)") is True

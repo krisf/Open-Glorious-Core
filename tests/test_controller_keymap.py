@@ -23,11 +23,11 @@ from open_glorious_core.device import HidDevice
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORY = (ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin").read_bytes()
-# G12 item 6: the keystate factory-defaults degradation displays slot 58 with
-# the EMPIRICAL overlay (Caps Lock 0x39 · normal), not the vendor "Unassigned
-# (0xFF)" — the misreading that hid the G11 kill. Display + write overlay
-# only; FACTORY itself stays the raw vendor bytes.
-FACTORY_DISPLAY = bytes(bytearray(FACTORY)[:58] + b"\x39" + bytearray(FACTORY)[59:])
+# G17 (retracts G12 item 6): the keystate factory-defaults degradation shows
+# the RAW vendor bytes — slot 60 already carries Caps Lock (0x39 · normal),
+# slot 58 is the dead spare the G13 sweep proved silent (0xFF). No display
+# overlay; FACTORY_DISPLAY is just the factory table.
+FACTORY_DISPLAY = FACTORY
 TYPES = (ROOT / "src" / "open_glorious_core" / "data" / "default_types.bin").read_bytes()
 
 DEVICE = HidDevice(
@@ -199,9 +199,13 @@ def test_keystate_normal_device_shape(controller) -> None:
     assert slots[0]["type_name"] == "normal" and slots[0]["cell_active"] is True
     assert slots[14]["type_name"] == "consumer" and slots[14]["cell_active"] is True
     assert slots[80]["type_name"] == "modifier" and slots[80]["cell_active"] is True
-    assert slots[58]["code_type_label"] == "unused"  # device byte 0xFF
+    assert slots[58]["code_type_label"] == "unused"  # dead spare, factory 0xFF
     assert slots[58]["type_name"] == "unused"
     assert slots[58]["cell_active"] is False
+    # Caps Lock is slot 60 (G17, G13 sweep): vendor 0x39 · normal, active.
+    assert slots[60]["code_type_label"] == "normal"
+    assert slots[60]["type_name"] == "normal"
+    assert slots[60]["cell_active"] is True
 
     switch = data["can_switch"]
     assert len(switch) == 9
@@ -230,29 +234,25 @@ def test_keystate_normal_device_shape(controller) -> None:
 
 
 def test_keystate_slots_carry_is_keycap_flag(controller) -> None:
-    """G9 FIX A + G10/G11: every slot object carries the per-slot is_keycap
-    boolean; all 13 keycap-less matrix positions (G9's 8, the head cells
-    55/56/57/59 and the hidden vendor caps duplicate 60) are False, real
-    keycaps — including the empirical CapsLock at 58 — are True."""
+    """G9 FIX A + G10/G17: every slot object carries the per-slot is_keycap
+    boolean; all 13 keycap-less matrix positions (G9's 8 plus the head cells
+    55-59, dead spare 58 included) are False, real keycaps — including Caps
+    Lock at its sweep-confirmed slot 60 — are True."""
     ctrl, _ = controller
     slots = ctrl.get_keystate()["keymap"]["slots"]
     assert app_module.NON_KEYCAP_SLOTS == {
-        14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111
+        14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111
     }
     assert all("is_keycap" in slot for slot in slots)
     for slot in app_module.NON_KEYCAP_SLOTS:
         assert slots[slot]["is_keycap"] is False, slot
-    # Head cells 55/56/57/59: factory 0xFF, no empirical identity, never caps.
-    for slot in (55, 56, 57, 59):
+    # Head cells 55-59: factory 0xFF, no keycap, never caps (G17).
+    for slot in (55, 56, 57, 58, 59):
         assert slots[slot]["is_keycap"] is False, slot
         assert FACTORY[slot] == 0xFF, slot
-    # G11 operator-confirmed: the CapsLock cell on this WB5092 firmware is
-    # slot 58 (keycap), even though the VENDOR dump puts 0xFF there.
-    assert slots[58]["is_keycap"] is True
-    assert FACTORY[58] == 0xFF, "vendor table lies at 58 (G11)"
-    # Slot 60 is the vendor table's Caps Lock cell (0x39): hidden, no
-    # empirical identity, bound to NO cap.
-    assert slots[60]["is_keycap"] is False
+    # Slot 60 is the CapsLock cell — the vendor dump's OWN cell (0x39),
+    # confirmed by the G13 sweep (F14@60 emitted on a caps press; 58 silent).
+    assert slots[60]["is_keycap"] is True
     assert FACTORY[60] == 0x39
     # Real keycaps around the row-6 spacers: LCtrl / Space / Fn / Left.
     for slot in (100, 105, 109, 112):
@@ -272,19 +272,21 @@ def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.Monke
     data = payload["keymap"]
     assert data["source"] == "factory-default"
     assert data["is_dirty_source"] is True
-    # The blank shadow is NEVER displayed: packaged factory bytes instead,
-    # with the G12 empirical overlay at slot 58 (Caps Lock 0x39, not 0xFF).
+    # The blank shadow is NEVER displayed: packaged factory bytes verbatim
+    # (G17: no overlay — slot 60 already carries Caps Lock 0x39 · normal).
     assert [slot["code"] for slot in data["slots"]] == list(FACTORY_DISPLAY)
-    assert data["slots"][58]["code_name"] == "Caps Lock (0x39)"
-    assert data["slots"][58]["code_type_label"] == "normal"
+    assert data["slots"][60]["code_name"] == "Caps Lock (0x39)"
+    assert data["slots"][60]["code_type_label"] == "normal"
     # G15 item 2: effective types surface. The factory table is self-
-    # consistent on every vendor byte; slot 58 is the one exception — the
-    # empirical overlay gives it code 0x39, whose effective type is 0x01.
+    # consistent on every vendor byte (slot 60 is vendor type 0x01), so the
+    # effective table IS the packaged table here.
     assert [slot["code_type"] for slot in data["slots"]] == [
-        0x01 if slot["slot"] == 58 else TYPES[slot["slot"]] for slot in data["slots"]
+        TYPES[slot["slot"]] for slot in data["slots"]
     ]
-    assert data["slots"][58]["type_name"] == "normal"
-    assert data["slots"][58]["cell_active"] is True
+    assert data["slots"][60]["type_name"] == "normal"
+    assert data["slots"][60]["cell_active"] is True
+    assert data["slots"][58]["type_name"] == "unused"
+    assert data["slots"][58]["cell_active"] is False
     assert data["slots"][15]["type_name"] == "unused"
     assert data["slots"][15]["cell_active"] is False
     assert data["slots"][0]["code_name"] == "Escape (0x29)"
@@ -312,23 +314,25 @@ def test_keystate_blank_mirror_degrades_to_factory_defaults(monkeypatch: pytest.
     assert len(slots) == KEYMAP_SLOTS == 120
     assert slots[0]["slot"] == 0
     assert slots[0]["code"] == 0x29
-    # Slots are the packaged factory table (G12 empirical overlay at 58:
-    # Caps Lock 0x39 · normal), never the blank device answer.
+    # Slots are the packaged factory table verbatim (G17: no overlay — Caps
+    # Lock 0x39 · normal sits at slot 60 on the vendor bytes), never the blank
+    # device answer.
     assert [slot["code"] for slot in slots] == list(FACTORY_DISPLAY)
-    assert slots[58]["code"] == 0x39
-    assert slots[58]["code_name"] == "Caps Lock (0x39)"
-    assert slots[58]["code_type_label"] == "normal"
-    assert slots[58]["factory_code"] == 0xFF  # raw vendor byte stays visible
+    assert slots[60]["code"] == 0x39
+    assert slots[60]["code_name"] == "Caps Lock (0x39)"
+    assert slots[60]["code_type_label"] == "normal"
+    assert slots[60]["factory_code"] == 0x39  # vendor byte, caps-complete
     # The drawer/tooltip composition the plan pins (built in JS from these):
     assert (
-        f"Slot 58 · {slots[58]['code_name']} · {slots[58]['code_type_label']}"
-        == "Slot 58 · Caps Lock (0x39) · normal"
+        f"Slot 60 · {slots[60]['code_name']} · {slots[60]['code_type_label']}"
+        == "Slot 60 · Caps Lock (0x39) · normal"
     )
-    # G9 FIX A: the keycap flag stamps on the degraded path too. G11: the
-    # empirical CapsLock@58 is a keycap and the hidden cells (55/56/57/59/60)
-    # are not, exactly as on the live path — /api/keystate and the grid agree.
+    # G9 FIX A: the keycap flag stamps on the degraded path too. G17: the
+    # CapsLock@60 keycap is visible and the hidden head cells (55-59, dead
+    # spare 58 included) are not, exactly as on the live path — /api/keystate
+    # and the grid agree.
     assert slots[103]["is_keycap"] is False and slots[105]["is_keycap"] is True
-    assert slots[58]["is_keycap"] is True and slots[60]["is_keycap"] is False
+    assert slots[60]["is_keycap"] is True and slots[58]["is_keycap"] is False
     assert data["profile"] == 1 and data["layer"] == 1
     assert payload["message"] == BLANK_MIRROR_MESSAGE
 
@@ -412,28 +416,30 @@ def test_apply_keymap_valid_writes_full_table(controller) -> None:
 
 def test_apply_keymap_effective_types_overlay(controller) -> None:
     """G15 fix spec 1, on the real controller write path: an assigned cell
-    whose vendor type is 0xFF must go out type 0x01 (the caps→NumpadDivide
-    incident), a modifier assignment 0x02, and the knob's 0x03 / modifier
-    0x02 typings are never touched."""
+    whose vendor type is 0xFF must go out type 0x01 (the G15 incident: the
+    GUI write rode the vendor 0xFF and did nothing), a modifier assignment
+    0x02, and the knob's 0x03 / modifier 0x02 typings are never touched."""
     ctrl, backend = controller
     codes = list(FACTORY)
-    codes[58] = 0x54  # caps cell → NumpadDivide (the operator's write)
+    codes[60] = 0x54  # caps cell → NumpadDivide (the operator's write)
+    codes[16] = 0x54  # spare 0xFF-type cell → NumpadDivide (activation pin)
     codes[15] = 0xE0  # spare cell → LCtrl assignment
     codes[14] = 0x68  # knob cell: REASSIGNED, its 0x03 typing stays sacred
     assert ctrl.run_action("apply-keymap", {"codes": codes})["ok"] is True
     types = backend.calls_named("set_keymap_codes")[0][4]
-    assert types[58] == 0x01, "assigned 0xFF-type cell activates as normal key"
+    assert types[16] == 0x01, "assigned 0xFF-type cell activates as normal key"
+    assert types[60] == 0x01, "caps cell typing stays vendor-normal (protected 0x01)"
     assert types[15] == 0x02, "modifier-code assignment matches vendor typing"
     assert types[14] == 0x03, "knob consumer typing protected (rule 3)"
     for slot in (80, 91, 100, 101, 102, 108, 110):
         assert types[slot] == 0x02, "the vendor modifier set is untouched"
     for slot in range(KEYMAP_SLOTS):
-        if FACTORY[slot] == 0xFF and slot not in (15, 58):
+        if FACTORY[slot] == 0xFF and slot not in (15, 16):
             assert types[slot] == TYPES[slot], f"unassigned slot {slot} untouched"
     # Un-assigning a cell does not sneak a type byte in.
-    codes[58] = 0xFF
+    codes[16] = 0xFF
     ctrl.run_action("apply-keymap", {"codes": codes})
-    assert backend.calls_named("set_keymap_codes")[-1][4][58] == 0xFF
+    assert backend.calls_named("set_keymap_codes")[-1][4][16] == 0xFF
 
 
 def test_apply_keymap_validation(controller) -> None:
@@ -562,13 +568,14 @@ def test_matrix_self_test_scans_mirror_with_zero_writes(controller) -> None:
     report = result["self_test"]
     assert report and report[0].startswith("MATRIX SELF-TEST")
     joined = "\n".join(report)
-    # The G11 empirical facts are in the report: CapsLock scanned at slot 58.
+    # The G13 sweep verdict is in the report: CapsLock scanned at slot 60,
+    # the vendor table's own cell (0x39), scanned "as mapped".
     caps_lines = [line for line in report if "Caps Lock" in line and "code 0x" in line]
-    assert caps_lines and "slot  58" in caps_lines[0] and "0xFF" in caps_lines[0]
+    assert caps_lines and "slot  60" in caps_lines[0] and "0x39" in caps_lines[0]
     assert "as mapped" in caps_lines[0]
-    assert "CapsLock = slot 58" in joined
-    assert "slots 55-57, 59, 60 bound to a cap: NO" in joined
-    assert "55, 56, 57, 59" in joined
+    assert "CapsLock = slot 60" in joined
+    assert "slots 55-59 bound to a cap: NO" in joined
+    assert "55, 56, 57, 58, 59" in joined
     assert "Caps bound: 82" in joined
     # READ-ONLY contract: the only device traffic is the config-mirror GET.
     assert backend.calls_named("read_keymap")
@@ -583,7 +590,7 @@ def test_matrix_self_test_flags_deviations_and_dead_caps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = FakeBackend(codes=[
-        0x59 if slot == 58 else (0xFF if slot == 105 else FACTORY[slot])
+        0x59 if slot == 60 else (0xFF if slot == 105 else FACTORY[slot])
         for slot in range(KEYMAP_SLOTS)
     ])
     ctrl, _ = make_controller(monkeypatch, backend)
@@ -592,10 +599,10 @@ def test_matrix_self_test_flags_deviations_and_dead_caps(
     caps_line = next(
         line for line in report if "Caps Lock" in line and "code 0x" in line
     )
-    # CapsLock scans at the empirical cell 58; 0x59 there is a deviation
-    # against the vendor byte (0xFF) — the scan stays byte-honest, G11.
-    assert "slot  58" in caps_line
-    assert "0x59" in caps_line and "DEVIATES (factory 0xFF)" in caps_line
+    # CapsLock scans at slot 60 (G17); 0x59 there is a deviation against the
+    # vendor byte (0x39) — the scan stays byte-honest, sweep-verified cell.
+    assert "slot  60" in caps_line
+    assert "0x59" in caps_line and "DEVIATES (factory 0x39)" in caps_line
     space_line = next(line for line in report if "Space" in line)
     assert "UNASSIGNED (0xFF) — keycap dead (factory 0x2C)" in space_line
     assert "DEVIATES" in lines
@@ -688,5 +695,5 @@ def test_cli_flag_prints_report_and_exits_before_gui(
     out = capsys.readouterr().out
     assert "MATRIX SELF-TEST" in out
     assert "Caps Lock" in out
-    assert "slots 55-57, 59, 60 bound to a cap: NO" in out
+    assert "slots 55-59 bound to a cap: NO" in out
     assert not backend.calls_named("set_keymap_codes")

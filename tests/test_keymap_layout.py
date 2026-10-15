@@ -267,8 +267,8 @@ KNOWN_FACTORY_KEYS = {
     41: 0x14,  # Q
     50: 0x13,  # P
     54: 0x4B,  # PgUp (R2)
-    58: 0xFF,  # vendor says "unassigned spare" — G11: the EMPIRICAL CapsLock cell; vendor table is WRONG here
-    60: 0x39,  # Caps Lock per the VENDOR table (hidden duplicate; firmware caps = 58, G11)
+    58: 0xFF,  # unassigned spare (G17: a dead matrix cell — G11's "empirical CapsLock @58" is RETRACTED)
+    60: 0x39,  # Caps Lock — the vendor table's OWN cell, sweep-confirmed on WB5092 (G13/G17)
     61: 0x04,  # A
     73: 0x28,  # Enter
     74: 0x4E,  # PgDn (R3)
@@ -742,18 +742,16 @@ def test_reset_keymap_restores_factory_table(
     assert len(dev.writes) == 2
     reset_payload = dev.writes[-1]
     assert reset_payload[0] == 7 and reset_payload[1] == CMD_KEY_MATRIX
-    # G12: reset writes the factory table through the EMPIRICAL overlay —
-    # codes[58]=0x39 / types[58]=0x01 (raw vendor 0xFF @58 physically kills
-    # CapsLock on this firmware; remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE).
+    # G17 (retracts the G12 overlay): reset writes the PLAIN vendor factory
+    # table — the vector is caps-complete as shipped: codes[60]=0x39 /
+    # types[60]=0x01 is the sweep-confirmed CapsLock cell (G13 sweep); the
+    # G11 slot-58 claim was a misattribution, so no special bytes at 58.
     reset_codes = bytes(reset_payload[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS])
     reset_types = bytes(reset_payload[KEYMAP_TYPES_OFFSET : KEYMAP_TYPES_OFFSET + KEYMAP_SLOTS])
-    expected_reset_codes = bytearray(FACTORY_TABLE)
-    expected_reset_codes[58] = 0x39
-    expected_reset_types = bytearray(DEFAULT_TYPES)
-    expected_reset_types[58] = 0x01
-    assert reset_codes == bytes(expected_reset_codes)
-    assert reset_types == bytes(expected_reset_types)
-    assert reset_codes[58] == 0x39 and reset_types[58] == 0x01
+    assert reset_codes == FACTORY_TABLE
+    assert reset_types == DEFAULT_TYPES
+    assert reset_codes[60] == 0x39 and reset_types[60] == 0x01
+    assert reset_codes[58] == 0xFF  # dead matrix spare keeps its vendor byte
     after = {e.slot: e.scancode for e in backend.read_keymap()}
     assert after[13] == 0x46
 
@@ -768,12 +766,12 @@ def test_reset_keymap_writes_factory_table_regardless_of_current_state(
     with pytest.raises(BackendError, match="slot 13"):  # verify sees 0x68 vs factory 0x46
         backend.reset_keymap()
     assert len(dev.writes) == 1
-    # G12: same EMPIRICAL overlay on the reset payload (slot 58 = 0x39).
+    # G17: the same PLAIN vendor factory table on the reset payload — the
+    # sweep-confirmed caps cell (slot 60) carries 0x39 as shipped; slot 58
+    # (dead spare) stays 0xFF.
     reset_codes = bytes(dev.writes[0][KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS])
-    expected_reset_codes = bytearray(FACTORY_TABLE)
-    expected_reset_codes[58] = 0x39
-    assert reset_codes == bytes(expected_reset_codes)
-    assert reset_codes[58] == 0x39
+    assert reset_codes == FACTORY_TABLE
+    assert reset_codes[60] == 0x39
 
 
 # ---------------------------------------------------------------------------
@@ -824,13 +822,14 @@ def test_shipped_default_types_agree_with_the_slot_map() -> None:
     assert FACTORY_TABLE[14] == 0x02  # KEYMAP_MAP.md: vendor-internal knob/mute byte
     ff_slots = {slot for slot, value in enumerate(types) if value == 0xFF}
     unlabeled = {slot for slot in range(KEYMAP_SLOTS) if slot not in KEYMAP_SLOT_LABELS}
-    # 14/72/92: matrix artifacts, not spares. 60: intentionally UNLABELED by
-    # G11 — the vendor table's Caps Lock cell (type 0x01, byte 0x39) with no
-    # empirical identity on the WB5092 firmware (real caps cell = 58); it is
-    # hidden, not a keycap, so it earns no label.
-    assert unlabeled - ff_slots == {14, 60, 72, 92}
+    # 14/72/92: matrix artifacts, not spares. G17: slot 60 is LABELED again —
+    # the vendor table's Caps Lock cell (type 0x01, byte 0x39) is the real
+    # caps cell on WB5092 (G13 sweep). Slot 58 is a plain factory-0xFF dead
+    # spare, and every 0xFF-type spare is unlabeled by definition, so the
+    # artifacts are the only non-FF unlabeled cells.
+    assert unlabeled - ff_slots == {14, 72, 92}
     assert types[14] == 0x03 and types[72] == 0x01 and types[92] == 0x01
-    assert types[60] == 0x01 and types[58] == 0xFF  # G11 byte+type facts
+    assert types[60] == 0x01 and types[58] == 0xFF  # G17 sweep-verified byte+type facts
     assert len(ff_slots) == 35
 
 

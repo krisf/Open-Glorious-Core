@@ -199,25 +199,50 @@ keycaps — the row widths above confirm no caps fit).
   slots 34/54/74/94, arrows `50/51/4F` at 112/113/114, Fn `0xA0` at 109.
 - Modifiers: `E0/E3/E2` (LCtrl/LWin/LAlt) at 100-102, `E1` LShift at 80,
   `E5` RShift at 91, `E6/E4` (RAlt/RCtrl) at 108/110.
-- 82 labeled slots, none labeled in a slot the dump reports as `0xFF` — per
-  the **vendor dump's own view**; see the EMPIRICAL-FIRMWARE note below, where
-  the slot-58 Caps Lock label is firmware truth overriding the dump.
+- 82 labeled slots, none labeled in a slot the dump reports as `0xFF` — the
+  tables above ARE the firmware truth (see the SWEEP-VERDICT note below; the
+  G11 note that claimed a slot-58 Caps Lock overriding the dump is retracted).
 - Automated in `tests/test_keymap_layout.py` (fixture provenance + spot checks).
 
-## EMPIRICAL-FIRMWARE note (G11)
+## SWEEP-VERDICT note (G13 sweep, G17 — retracts the G11 "EMPIRICAL-FIRMWARE" note)
 
-The tables above transcribe the vendor `Buttoninfo_Default` factory dump. On
-the operator's GMMK Pro Wireless (`320F:5092`, stock WB5092 firmware) that
-dump carries one confirmed error: **the physical CapsLock cell is slot 58, not
-60** (operator-verified 2026-10-15). Writing the vendor factory vector
-(`0xFF` at 58) physically killed CapsLock; a recovery write of `0x39` to slot
-58 restored it, while writes aimed at the vendor's slot 60 did nothing on the
-board. The vendor table lacks this truth — **trust the firmware, not
-`Buttoninfo_Default`.**
+The tables above transcribe the vendor `Buttoninfo_Default` factory dump, and
+on the operator's GMMK Pro Wireless (`320F:5092`, stock WB5092 firmware) that
+dump is **correct** about CapsLock: **the physical CapsLock cell is slot 60**,
+exactly where the dump puts `0x39` (type `0x01`).
 
-Slot 60 keeps the dump's duplicate `0x39` and has no empirical identity: the
-GUI hides it (non-keycap, like 55–57/59), and it must not be touched without
-an operator-confirmed plan. Before remapping any row-4 head cell from the GUI,
-re-verify the cell's physical identity on the live board first. Slot table of
-record: `src/open_glorious_core/static/keymap-slots.js` (row 4 heads at 58);
-pinned by `tests/test_board_matrix_slots.py` / `tests/test_keymap_slots_js.py`.
+The G11 note ("the physical CapsLock cell is slot 58, not 60 — trust the
+firmware, not `Buttoninfo_Default`", operator-reported 2026-10-15 morning) is
+**RETRACTED as a misattribution**. The morning "writes to 60 did nothing"
+observation is explained by the recovery itself: the recovery recipe wrote
+`0x39` to BOTH the vendor cell 60 and the then-suspected cell 58, and the
+board answered via 60 — the cell that was live all along.
+
+The retraction evidence is the G13 targeted cell sweep (same board, same
+firmware, profile 1 layer 1):
+
+1. GUI bind-first write of `F13 (0x68)` → slot 58 and `F14 (0x69)` → slot 60
+   (both cells factory-0xFF-type, activated via the G15 effective types).
+2. Caps Lock pressed: the OS hidraw key listener captured `00 00 69` twice —
+   F14, slot 60 — and **nothing** from 58 (see `remap/` sweep captures,
+   operator-verified 2026-10-15).
+3. Factory restore (plain vendor factory table) afterwards: operator —
+   "yes its normal again": CapsLock works from the untouched vendor bytes.
+
+Consequences encoded in code and tests (G17):
+
+- Slot 58 is a **dead matrix spare**: it joins the row-4 head cells 55, 56,
+  57, 59 as factory-`0xFF`, keycap-less, hidden from the grid
+  (`non_keycap_slots` / `NON_KEYCAP_SLOTS`).
+- Slot 60 is the Caps Lock keycap: it heads row 4 of the GUI grid
+  (`keymap-slots.js`), is labeled in `backend.KEYMAP_SLOT_LABELS`, and the
+  factory-default display shows it as `Caps Lock (0x39) · normal` from the
+  raw vendor bytes — no display overlay, no write overlay.
+- The G12 "empirical caps overlay" (write + display patch at slot 58) is
+  removed: a factory reset is the PLAIN vendor factory table, which is
+  caps-complete at slot 60.
+- Operator re-gate: the caps→Numpad 1 GUI remap retry must be run once more
+  and VERIFIED by the app's key-event listener (arm → press → verdict) before
+  any further row-4 head-cell experiments. Slot table of record:
+  `src/open_glorious_core/static/keymap-slots.js` (row 4 heads at 60); pinned
+  by `tests/test_board_matrix_slots.py` / `tests/test_keymap_slots_js.py`.

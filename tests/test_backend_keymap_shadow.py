@@ -32,12 +32,6 @@ from open_glorious_core.backend import (
 ROOT = Path(__file__).resolve().parents[1]
 SHIPPED_TABLE = (ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin").read_bytes()
 
-# G12: reset_keymap writes the factory table through the EMPIRICAL overlay
-# (codes[58]=0x39, types[58]=0x01) — the raw vendor byte 0xFF at 58 physically
-# kills CapsLock on this firmware (remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE,
-# G11 incident), so a factory reset keeps the caps keycap alive.
-OVERLAY_TABLE = bytes(bytearray(SHIPPED_TABLE)[:58] + b"\x39" + bytearray(SHIPPED_TABLE)[59:])
-
 SHADOW_TAIL = (
     "device mirror is blank so read-back could not verify — physical key "
     "test is the only confirmation."
@@ -273,10 +267,12 @@ def test_reset_keymap_shadow_message_is_honest(
         "Wrote the factory default keymap to profile 2 layer 3 (cmd 3 KeyMatrix); "
         + SHADOW_TAIL
     )
-    # The factory table (G12 overlay applied: slot 58 = 0x39) was written
-    # device-side.
-    assert device.matrix == OVERLAY_TABLE
-    assert device.matrix[58] == 0x39
+    # G17: the PLAIN shipped factory table was written device-side — the
+    # vendor vector is caps-complete (CapsLock lives at slot 60, factory
+    # 0x39; the G12 slot-58 overlay is retracted with G11).
+    assert device.matrix == SHIPPED_TABLE
+    assert device.matrix[60] == 0x39
+    assert device.matrix[58] == 0xFF
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +327,7 @@ def test_fully_blank_mirror_reset_keymap_sends_once_with_caveat(
         + SHADOW_TAIL
     )
     assert len(device.sets) == 1
-    assert device.matrix == OVERLAY_TABLE  # factory table + G12 caps overlay
+    assert device.matrix == SHIPPED_TABLE  # plain vendor factory table (G17)
 
 
 def test_parsable_mirror_still_refuses_non_active_pair(
