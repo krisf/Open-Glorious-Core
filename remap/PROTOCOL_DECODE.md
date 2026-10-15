@@ -98,3 +98,14 @@ G6 live replay (39 factory reports: 0x08 open, 9×[0x03,0x04,0x09,LED],
 backlight went OFF (my hand-built LED cmd lacked the proven color/flags layout;
 restored via proven set_effect(4)/set_brightness(20)/set_speed(50) — PROOF the
 channel executes cmd 0x02). Key mappings kept working throughout.
+
+## G6 VERDICT (10-15) — WRITE PATH CONFIRMED PHYSICALLY
+Live exact-once test: modified matrix (PrtSc slot 13 → F13 0x68) to (1,1),
+then cmd 0x01 bind (1,1). User pressed PrtSc → **no longer sends PrtSc**
+(write LANDED physically). Reverted with pure factory matrix 0x03 to (1,1)
+(codes[13]=0x46) + cmd 0x01 bind.
+⇒ cmd 0x03 keymap writes WORK on wireless 5092. GET(0x81) mirror is NOT a
+readback path (uninitialized shadow post-reset, stays all-zero regardless of
+writes) — physical keypress is the only verification, exactly as CORE does it
+(push-only, never reads keymap back). Feature keymap remapping is PROVEN:
+Backend.set_keymap_codes() + change_profile() = working implementation.
