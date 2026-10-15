@@ -53,3 +53,11 @@ it for device-free construction.
 - G0 (Phase 0) PASS 2026-10-14: 28/28 tests independently re-run green (0.02s); commit 9a36433;
   hidraw sentinel design verified in code (_AUTO_DETECT default = legacy auto-detect;
   hidraw=None = device-free unit mode). P0 accepted.
+- G1 (Phase 1 batch 1) PASS 2026-10-15: sweep executed by OPERATOR (DSH sandbox has no
+  /dev nodes — operator amendment in PLAN.md). Baseline ×12 healthy; all 29 candidates
+  probed; every response byte-identical to pre-sweep baseline = ZERO side effects.
+  Result: hidraw GET mirrors the config buffer; scancode table decoded at 0x80-0xF7;
+  H1 write hypothesis (cmd 1 full-payload) pending device test. Commit cb2bebf.
+- INCIDENT 2026-10-15 01:09 UTC (out of scope, infra): vLLM :8180 (DSH backend) went
+  DOWN mid-plan (radiance-qfn exited 1 on 0.0.0.0:8180 bind collision after an earlier
+  crash). Restart via swap.sh radiance in progress; DSH work resumed after recovery.
