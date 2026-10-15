@@ -114,6 +114,22 @@ class DeadEarDevice(ShadowDevice):
         self.sets.append(bytes(report))
 
 
+class FullyBlankDevice(ShadowDevice):
+    """G8 live-device model (GMMK Pro WB 320F:5092, operator gate 10-15).
+
+    The GET mirror answers ALL ZERO — header included, zero nonzero bytes in
+    [4:] — TRUE EVEN IMMEDIATELY after a successful cmd 0x01 bind (tested at
+    0 s / +1 s / +4 s), so _parse_profile_layer_response yields None. The G7
+    strict guard refused every writer on exactly this board; G8 makes the
+    shadow case first-class: writers send, once, with the honest caveat.
+    """
+
+    def exchange(self, report: bytes) -> bytearray:
+        if report[1] != CMD_GET_CONFIG:
+            raise AssertionError(f"unsupported GET request {report[1]:#02x}")
+        return bytearray(256)  # 00 00 00 00 head + all-zero payload, forever
+
+
 def wire(monkeypatch: pytest.MonkeyPatch, device: ShadowDevice) -> StockGmmkProBackend:
     """Fake the device at the IO boundary, then build a backend on a fake path.
 
@@ -253,6 +269,73 @@ def test_reset_keymap_shadow_message_is_honest(
     )
     # The factory table itself was written device-side.
     assert device.matrix == SHIPPED_TABLE
+
+
+# ---------------------------------------------------------------------------
+# G8: fully blank mirror (live WB board) — writers SEND, never refuse
+# ---------------------------------------------------------------------------
+
+
+def test_fully_blank_mirror_set_keymap_codes_sends_once_with_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FullyBlankDevice()
+    backend = wire(monkeypatch, device)
+    message = backend.set_keymap_codes(1, 1, SHIPPED_TABLE)
+    # Sent, not refused: the caveat message, never a verification claim.
+    assert message.startswith(
+        f"Wrote the full {KEYMAP_SLOTS}-slot key matrix to profile 1 layer 1 (cmd 3 KeyMatrix); "
+    )
+    assert message.endswith(SHADOW_TAIL)
+    assert "verified" not in message
+    # Exactly ONE _send_feature_report (the cmd 0x03 write); the pre-read and
+    # the single read-back go through the GET exchange, no second write.
+    assert len(device.sets) == 1
+    assert device.sets[0][1] == CMD_KEY_MATRIX
+    assert device.matrix == SHIPPED_TABLE  # write adopted device-side
+
+
+def test_fully_blank_mirror_set_keymap_sends_once_with_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FullyBlankDevice()
+    backend = wire(monkeypatch, device)
+    entries = [KeymapEntry(slot=0, scancode=0x68)]
+    message = backend.set_keymap(entries, profile=1, layer=1)
+    assert message == (
+        "Wrote 1 keymap change(s) to profile 1 layer 1 (cmd 3 KeyMatrix); " + SHADOW_TAIL
+    )
+    assert len(device.sets) == 1
+    # Blank mirror base table + the patch — target pair taken as given.
+    want = bytearray(KEYMAP_SLOTS)
+    want[0] = 0x68
+    assert device.matrix == bytes(want)
+
+
+def test_fully_blank_mirror_reset_keymap_sends_once_with_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FullyBlankDevice()
+    backend = wire(monkeypatch, device)
+    message = backend.reset_keymap(1, 1)
+    assert message == (
+        "Wrote the factory default keymap to profile 1 layer 1 (cmd 3 KeyMatrix); "
+        + SHADOW_TAIL
+    )
+    assert len(device.sets) == 1
+    assert device.matrix == SHIPPED_TABLE  # factory table written device-side
+
+
+def test_parsable_mirror_still_refuses_non_active_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G8 tolerance is for BLANK mirrors only: a parsable mirror reporting a
+    different active pair keeps the OLD refusal, before anything is sent."""
+    device = ShadowDevice(profile=1, layer=1)
+    backend = wire(monkeypatch, device)
+    with pytest.raises(BackendError, match="not active"):
+        backend.set_keymap_codes(2, 1, SHIPPED_TABLE)
+    assert device.sets == []
 
 
 # ---------------------------------------------------------------------------

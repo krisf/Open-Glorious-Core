@@ -470,10 +470,12 @@ class StockGmmkProBackend(BaseBackend):
         defaults to the packaged vendor ``data/default_types.bin``
         (Buttoninfo_Default types: 0x01 normal x77, 0x02 x7 = the modifiers,
         0x03 consumer x1 = the knob/mute, 0xFF unused x35; PROTOCOL_DECODE.md).
-        The config mirror is read first — the mirror only exposes
-        the ACTIVE profile, so writing a non-active slot is refused instead of
-        silently hitting the wrong slot — then ONE report is sent (never
-        retried) and the mirror re-read to byte-compare the codes table.
+        The config mirror is read first — a parsable mirror only exposes the
+        ACTIVE profile, so writing a non-active slot is refused instead of
+        silently hitting the wrong slot (G8: a fully BLANK mirror is the
+        shadow-only state and is NOT refused — the target pair is taken as
+        given) — then ONE report is sent (never retried) and the mirror
+        re-read once to byte-compare the codes table.
 
         Types are not part of the GET mirror, so only the codes are verifiable
         read-back; that limitation is stated in the returned message. When the
@@ -485,7 +487,9 @@ class StockGmmkProBackend(BaseBackend):
         types_bytes = (
             self._default_types() if types is None else self._matrix_bytes("Keymap types", types)
         )
-        self._read_config_mirror(profile, layer)  # active-slot guard + device presence
+        # Shadow-tolerant active-slot guard + device presence (G8): a blank
+        # mirror never populates on the live WB board — send, don't refuse.
+        self._read_config_mirror_shadow_tolerant(profile, layer)
         shadow = self._write_keymap_matrix(codes_bytes, types_bytes, profile, layer)
         if shadow:
             return self._shadow_write_message(
@@ -506,8 +510,11 @@ class StockGmmkProBackend(BaseBackend):
     ) -> str:
         """Write the given keymap slots onto the current table and persist.
 
-        Reads the mirror, patches the slots, then sends the whole patched
+        Read the mirror, patch the slots, then send the whole patched
         matrix through cmd 0x03 (the vendor protocol has no per-key write).
+        A parsable mirror enforces the active-pair guard; a fully blank
+        (shadow) mirror is the G8 shadow-only state — the patch is applied
+        over the blank table and sent, never refused.
         """
         entries = list(entries)
         if not entries:
@@ -519,7 +526,7 @@ class StockGmmkProBackend(BaseBackend):
             if entry.slot in seen:
                 raise BackendError(f"Duplicate keymap slot {entry.slot} in entries.")
             seen.add(entry.slot)
-        mirror = self._read_config_mirror(profile, layer)
+        mirror = self._read_config_mirror_shadow_tolerant(profile, layer)
         codes = bytearray(self._codes_table(mirror))
         for entry in entries:
             codes[entry.slot] = entry.scancode
@@ -543,9 +550,11 @@ class StockGmmkProBackend(BaseBackend):
         factory table back with the same cmd-0x03 matrix write, using the
         vendor Buttoninfo_Default types array. The table written comes from the
         shipped dumps, never from what the device mirrors; the mirror is still
-        read first so a write to a NON-active profile/layer is refused.
+        read first so a write to a NON-active profile/layer is refused (G8: a
+        fully blank shadow mirror is the shadow-only state — never refused).
         """
-        self._read_config_mirror(profile, layer)  # active-slot guard + device presence
+        # Shadow-tolerant active-slot guard + device presence (G8).
+        self._read_config_mirror_shadow_tolerant(profile, layer)
         shadow = self._write_keymap_matrix(
             self._default_keymap_table(), self._default_types(), profile, layer
         )
@@ -636,8 +645,11 @@ class StockGmmkProBackend(BaseBackend):
             )
         return table
 
-    def _read_config_mirror(self, profile: int, layer: int) -> bytearray:
-        """GET report 7 (via the proven cmd-129 exchange) -> config mirror."""
+    def _get_config_mirror(self, profile: int, layer: int) -> bytearray:
+        """GET report 7 (via the proven cmd-129 exchange): raw mirror response.
+
+        Device presence + 1-3 selector validation only — no interpretation.
+        """
         if not self.hidraw:
             raise BackendError(self.install_hint())
         for name, value in (("profile", profile), ("layer", layer)):
@@ -646,12 +658,45 @@ class StockGmmkProBackend(BaseBackend):
         request = self._make_request(CMD_GET_CONFIG)
         request[2] = profile
         request[3] = layer
-        response = self._exchange_feature_report(request)
+        return self._exchange_feature_report(request)
+
+    def _read_config_mirror(self, profile: int, layer: int) -> bytearray:
+        """Strict mirror read (read path): a parsable active pair is required.
+
+        The "device response carries no parsable profile/layer" BackendError
+        raised on a fully blank answer IS the blank-shadow signature that
+        callers (app.py /api/keystate) detect and degrade on.
+        """
+        response = self._get_config_mirror(profile, layer)
         parsed = self._parse_profile_layer_response(response)
         if parsed is None:
             raise BackendError(
                 "Config mirror read failed: device response carries no parsable profile/layer."
             )
+        if parsed != (int(profile), int(layer)):
+            raise BackendError(
+                "The config mirror only exposes the ACTIVE profile/layer (currently "
+                f"{parsed[0]} / {parsed[1]}); profile {profile} layer {layer} is not active — "
+                "switch profiles on the device first."
+            )
+        return response
+
+    def _read_config_mirror_shadow_tolerant(self, profile: int, layer: int) -> bytearray:
+        """Keymap-writer pre-read guard (G8): a blank mirror is legal, not a refusal.
+
+        Live-device evidence (G8_SHADOW_PLAN.md, GMMK Pro WB 320F:5092): the
+        GET mirror answers ALL ZERO — header included — even immediately after
+        a successful cmd 0x01 bind, so the strict guard in
+        _read_config_mirror() made every keymap writer refuse on the very
+        board whose writes physically land. Semantics: a parsable pair keeps
+        the OLD guard (refuse when the device reports a different active
+        pair); a blank mirror (parse → None) is the shadow-only state — the
+        target profile/layer is taken as given and nothing is refused.
+        """
+        response = self._get_config_mirror(profile, layer)
+        parsed = self._parse_profile_layer_response(response)
+        if parsed is None:
+            return response  # shadow buffer: no active-pair information, no refusal
         if parsed != (int(profile), int(layer)):
             raise BackendError(
                 "The config mirror only exposes the ACTIVE profile/layer (currently "
@@ -704,20 +749,25 @@ class StockGmmkProBackend(BaseBackend):
         return number
 
     def _write_keymap_matrix(self, codes: bytes, types: bytes, profile: int, layer: int) -> bool:
-        """Send the matrix once, then byte-verify the mirror's codes table.
+        """Send the matrix once, then attempt ONE read-back of the mirror.
 
-        Returns True for the factory-reset SHADOW case (remap/PROTOCOL_DECODE.md
-        G6 verdict): the read-back codes table is the all-zero blank shadow
-        (KEYMAP_BLANK_TABLE). The mirror is push-only and stays blank forever
-        after a factory reset even though cmd 0x03 writes physically land —
-        an empty table is "read-back cannot verify", NOT a mismatch, so it
-        must not raise; callers return the shadow-caveat success message
-        instead. Returns False when the read-back byte-matches the payload.
+        Returns True for the SHADOW case, in both of its observed shapes
+        (remap/PROTOCOL_DECODE.md G6 verdict + G8_SHADOW_PLAN.md live probe):
+        the read-back response is fully blank (parse → None — the wireless
+        board's mirror never populates, header included), or the read-back
+        codes table is the all-zero blank shadow (KEYMAP_BLANK_TABLE). The
+        mirror is push-only: cmd 0x03 writes physically land while it stays
+        blank — a blank/unparsable read-back is "read-back cannot verify",
+        NOT a mismatch, so it must not raise and must not retry: no second
+        write, no extra GET, and callers return the shadow-caveat success
+        message. Returns False when the read-back byte-matches the payload.
         Any other difference is a true mismatch and raises.
         """
         payload = self._build_key_matrix_report(profile, layer, codes, types)
         self._send_feature_report(payload)
-        verified = self._read_config_mirror(profile, layer)
+        verified = self._get_config_mirror(profile, layer)
+        if self._parse_profile_layer_response(verified) is None:
+            return True  # fully blank mirror: shadow-only device, cannot verify
         actual = self._codes_table(verified)
         if actual == bytes(codes):
             return False
