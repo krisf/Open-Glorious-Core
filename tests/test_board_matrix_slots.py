@@ -1,13 +1,17 @@
-"""G10 board-matrix slot alignment — headless slot-table regressions.
+"""G10/G11 board-matrix slot alignment — headless slot-table regressions.
 
-The GUI grid binds every visual keycap to a matrix slot. The operator's live
-GUI bound the cap labeled "Caps Lock" to spare slot 58 (0xFF, no physical key)
-instead of the real CapsLock slot 60; G10 rebuilt the mapping as per-row slot
-LITERALS transcribed from remap/KEYMAP_MAP.md, shipped in
-static/keymap-slots.js. This module parses that table's JSON block verbatim
-(no node, no DOM, no device) and pins the triple-confirmed facts of
-G10_UI_TARGET_PLAN.md: byte (default_keymap.bin) + map (KEYMAP_MAP.md) +
-physical (operator) agreement.
+The GUI grid binds every visual keycap to a matrix slot. G10 rebuilt that
+mapping as per-row slot LITERALS transcribed from remap/KEYMAP_MAP.md; G11
+then applied the operator-confirmed EMPIRICAL fix: on the GMMK Pro WIRELESS
+320F:5092 stock firmware the physical CapsLock cell is slot 58 — the vendor
+Buttoninfo_Default (0xFF at 58, 0x39 at 60) is WRONG there (the factory-vector
+revert physically killed CapsLock; a recovery 0x39@58 restored it). Slot 60
+keeps a duplicate 0x39 with no empirical identity and is hidden like the
+55/56/57/59 head cells. This module parses the shipped table's JSON block
+verbatim (no node, no DOM, no device) and pins the G11 facts of
+G11_CAPS_EMPIRICAL_PLAN.md: CapsLock cap → slot 58; 55/56/57/59/60 bound to
+NO cap; the byte facts recorded honestly (FACTORY[58]==0xFF vendor lie,
+FACTORY[60]==0x39 hidden duplicate).
 """
 from __future__ import annotations
 
@@ -42,8 +46,10 @@ EXPECTED_ROWS: list[tuple[list[int], list[str | None]]] = [
     (list(range(40, 55)),
      ["Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "LBracket",
       "RBracket", "Backslash", "PageUp"]),
-    # Row 4 (121-144): Caps Lock IS slot 60 — the block starts at 60, NOT 55.
-    (list(range(60, 75)),
+    # Row 4 (121-144 + G11 EMPIRICAL-FIRMWARE note): Caps Lock IS slot 58 —
+    # the operator-confirmed cell on this firmware; 60 (vendor 0x39 duplicate)
+    # and 55-57/59 have no empirical identity and head NO visual row.
+    ([58] + list(range(61, 75)),
      ["Caps Lock", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Semicolon",
       "Quote", None, "Enter", "PageDown"]),
     # Row 5 (146-169): LShift Z..M , . / RShift, 92 artifact, Up, End(R4).
@@ -56,10 +62,12 @@ EXPECTED_ROWS: list[tuple[list[int], list[str | None]]] = [
       "Right Alt", "Fn", "Right Ctrl", None, "Left", "Down", "Right"]),
 ]
 
-# G9 NON_KEYCAP_SLOTS ∪ the head-of-block spares (KEYMAP_MAP.md 115-119).
-HEAD_OF_BLOCK_SPARES = frozenset({55, 56, 57, 58, 59})
+# G9 NON_KEYCAP_SLOTS ∪ the hidden row-4 head cells (KEYMAP_MAP.md 115-119 +
+# G11: 60 is the vendor-table caps duplicate with no empirical identity).
+HEAD_OF_BLOCK_SPARES = frozenset({55, 56, 57, 59})
+VENDOR_CAPS_DUPLICATE = frozenset({60})
 G9_NON_KEYCAP = frozenset({14, 72, 92, 103, 104, 106, 107, 111})
-EXPECTED_NON_KEYCAP = G9_NON_KEYCAP | HEAD_OF_BLOCK_SPARES
+EXPECTED_NON_KEYCAP = G9_NON_KEYCAP | HEAD_OF_BLOCK_SPARES | VENDOR_CAPS_DUPLICATE
 
 
 @pytest.fixture(scope="module")
@@ -102,13 +110,13 @@ def test_row_tables_are_the_map_tables(table: dict) -> None:
     assert _row_maps(table) == EXPECTED_ROWS
 
 
-def test_row_4_visual_block_starts_at_slot_60_not_55(table: dict) -> None:
+def test_row_4_visual_block_starts_at_empirical_caps_slot_58(table: dict) -> None:
     row4 = table["rows"][3]["slots"]
-    assert row4[0] == 60, "the row-4 block must START at the real CapsLock slot"
+    assert row4[0] == 58, "the row-4 block must START at the empirical CapsLock slot"
     visual = set(_visual_slots(table))
-    assert not visual & HEAD_OF_BLOCK_SPARES, (
-        "head-of-block 0xFF spares 55-59 belong to NO visual row "
-        "(KEYMAP_MAP.md 115-119: row-3 trailing unassigned spares)"
+    assert not visual & (HEAD_OF_BLOCK_SPARES | VENDOR_CAPS_DUPLICATE), (
+        "head cells 55/56/57/59 and the vendor caps duplicate 60 belong to NO "
+        "visual row (KEYMAP_MAP.md 115-119 + EMPIRICAL-FIRMWARE note)"
     )
 
 
@@ -127,11 +135,14 @@ def test_clickable_caps_are_exactly_the_82_physical_keycaps(table: dict) -> None
     }
     assert clickable == expected
     assert len(clickable) == 82, "KEYMAP_MAP.md: 82 physical keys"
-    # The plan's absence rule: G9 NON_KEYCAP ∪ {55..59} never clickable.
+    # The plan's absence rule: G9 NON_KEYCAP ∪ {55,56,57,59,60} never clickable.
     assert not clickable & EXPECTED_NON_KEYCAP
-    # Byte cross-check: every clickable cap has a real factory code.
-    for slot in clickable:
+    # Byte cross-check: every clickable cap has a real factory code — with the
+    # one G11 exception: slot 58, the operator-confirmed CapsLock cell whose
+    # VENDOR factory byte is 0xFF (the table lies; the firmware does not).
+    for slot in clickable - {58}:
         assert FACTORY[slot] != 0xFF, slot
+    assert FACTORY[58] == 0xFF, "G11: CapsLock@58 — documented vendor-table lie"
     # Keycap-less VISUAL slots (row-6 spacers) are factory 0xFF; 14/72/92 are
     # the raw-byte artifacts (non-FF bytes, no keycap — KEYMAP_MAP.md 32-42).
     for slot in (103, 104, 106, 107, 111):
@@ -142,13 +153,18 @@ def test_clickable_caps_are_exactly_the_82_physical_keycaps(table: dict) -> None
 
 # --- triple-confirmed slots (G10_UI_TARGET_PLAN.md "PROVEN slot facts") ------
 
-def test_caps_lock_cap_resolves_to_slot_60_and_58_is_unbound(table: dict) -> None:
+def test_caps_lock_cap_resolves_to_empirical_slot_58_and_60_is_unbound(table: dict) -> None:
     names = _slot_names(table)
     caps = {name: slot for slot, name in names.items() if name is not None}
-    assert caps["Caps Lock"] == 60
-    assert 58 not in names, "slot 58 bound to a cap — the G10 defect"
-    assert 58 in table["non_keycap_slots"]
-    assert FACTORY[58] == 0xFF and FACTORY[60] == 0x39  # byte cross-check
+    assert caps["Caps Lock"] == 58, (
+        "G11: on the WB5092 firmware the CapsLock cell is slot 58 "
+        "(operator-confirmed; vendor Buttoninfo_Default says 60 and is wrong)"
+    )
+    assert 60 not in names, "slot 60 bound to a cap — the vendor-table trap"
+    assert 60 in table["non_keycap_slots"]
+    # Byte facts recorded honestly: the vendor dump has CapsLock's code at 60
+    # and 0xFF at 58 — the firmware refutes exactly that pair.
+    assert FACTORY[58] == 0xFF and FACTORY[60] == 0x39
 
 
 @pytest.mark.parametrize(
@@ -184,9 +200,10 @@ def test_app_module_non_keycap_slots_extended(table: dict) -> None:
     assert app_module.NON_KEYCAP_SLOTS == EXPECTED_NON_KEYCAP
     assert app_module.NON_KEYCAP_SLOTS >= G9_NON_KEYCAP  # G9 set only grew
     assert set(table["non_keycap_slots"]) == set(app_module.NON_KEYCAP_SLOTS)
-    # Byte evidence for the G10 additions.
+    # Byte evidence for the hidden head cells (60 is the non-FF vendor trap).
     for slot in HEAD_OF_BLOCK_SPARES:
         assert FACTORY[slot] == 0xFF, slot
+    assert FACTORY[60] == 0x39  # hidden, no empirical identity (G11)
 
 
 def test_non_keycap_marks_match_the_table(table: dict) -> None:
@@ -194,5 +211,5 @@ def test_non_keycap_marks_match_the_table(table: dict) -> None:
     for slot, key in _slot_names(table).items():
         if slot in G9_NON_KEYCAP:
             assert key is None, f"visual slot {slot} must carry no key name"
-    # 55-59 are in the exclusion set and in no visual row at all.
-    assert non - set(_visual_slots(table)) == HEAD_OF_BLOCK_SPARES
+    # 55/56/57/59/60 are in the exclusion set and in no visual row at all.
+    assert non - set(_visual_slots(table)) == HEAD_OF_BLOCK_SPARES | VENDOR_CAPS_DUPLICATE

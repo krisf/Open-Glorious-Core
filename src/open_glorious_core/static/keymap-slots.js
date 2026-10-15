@@ -1,26 +1,31 @@
-// G10 board-matrix slot alignment — the SINGLE source of truth for which
-// matrix slot every visual keycap targets. The table below is transcribed
-// row by row from remap/KEYMAP_MAP.md (the 120-slot section, lines 46-194):
-// every row's slot numbers AND its key names come from the map's row tables,
-// never from an arithmetic stride. This exists because the operator's live
-// GUI wrote slot 58 (a head-of-block 0xFF spare with NO physical key —
-// KEYMAP_MAP.md lines 115-119 + factory bytes default_keymap.bin[55..59])
-// when the operator clicked the cap labeled "Caps Lock": the real CapsLock
-// is slot 60 (KEYMAP_MAP.md line 125, default_keymap.bin[60] = 0x39).
-// A grid formula (`row * stride + column`) can silently grow that kind of
-// per-row offset; per-row slot LITERALS cannot — row 4 starts at slot 60.
+// G11 empirical-firmware slot alignment — the SINGLE source of truth for
+// which matrix slot every visual keycap targets. The table below is transcribed
+// row by row from remap/KEYMAP_MAP.md (the 120-slot section) PLUS its
+// EMPIRICAL-FIRMWARE note: every row's slot numbers AND its key names come
+// from the map, never from an arithmetic stride. The one place the firmware
+// OVERRIDES the vendor table is Caps Lock: on the operator's GMMK Pro WIRELESS
+// (320F:5092, stock firmware) the physical CapsLock cell is slot 58,
+// operator-confirmed 2026-10-15. The vendor Buttoninfo_Default puts 0x39 at
+// slot 60 and 0xFF at 58, and that is WRONG here: pushing the factory vector
+// (0xFF at 58) physically killed CapsLock, and a recovery write of 0x39 to 58
+// restored it. Slot 60 keeps a duplicate 0x39 with NO empirical identity —
+// it is hidden (non-keycap) and must NOT be touched without an
+// operator-confirmed plan. A grid formula (`row * stride + column`) can
+// silently grow per-row offsets; per-row slot LITERALS cannot — row 4's head
+// cell is 58 (empirical Caps Lock), NOT the vendor's 60.
 //
-// Rules the table encodes (KEYMAP_MAP.md layout model, lines 10-30):
+// Rules the table encodes (KEYMAP_MAP.md layout model + EMPIRICAL-FIRMWARE):
 //   * 6 physical rows x 20-slot USB blocks; each row's VISUAL table lists the
-//     row's keycap columns. Row 4's visual block is slots 60-74; slots 55-59
-//     are the TRAILING 0xFF spares of row 3's block (before Caps Lock) and
+//     row's keycap columns. Row 4's visual block is Caps Lock at slot 58 plus
+//     slots 61-74; slots 55, 56, 57, 59 (factory-0xFF head-of-block cells) and
+//     slot 60 (vendor-table caps duplicate) have no empirical identity and
 //     belong to NO visual row.
 //   * `keys[n] === null` = the slot in `slots[n]` carries NO physical keycap
 //     (matrix artifacts 14/72/92 — KEYMAP_MAP.md lines 32-42 — and the
 //     factory-0xFF row-6 spacer positions 103/104/106/107/111, lines 175-187).
 //   * The clickable-cap slot set is exactly the 82 real keycaps: visual
 //     slots minus `non_keycap_slots` (which is app.NON_KEYCAP_SLOTS mirrored,
-//     including the 55-59 head-of-block spares).
+//     including the hidden 55/56/57/59/60 head-of-block cells).
 //
 // Pure + DOM-free. Loaded by index.html as a classic script BEFORE app.js;
 // the python/node regression tests (tests/test_board_matrix_slots.py,
@@ -47,8 +52,8 @@ var KEYMAP_SLOT_TABLE = {
         "LBracket", "RBracket", "Backslash", "PageUp"]
     },
     {
-      "name": "Row 4 — slots 60-79, visual block STARTS AT SLOT 60, NOT 55 (KEYMAP_MAP.md lines 121-144; 55-59 are row 3 trailing 0xFF spares)",
-      "slots": [60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+      "name": "Row 4 — Caps Lock at slot 58 (G11 EMPIRICAL, operator-verified) + slots 61-74; 55, 56, 57, 59, 60 have no empirical identity and are hidden (KEYMAP_MAP.md EMPIRICAL-FIRMWARE note)",
+      "slots": [58, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
       "keys": ["Caps Lock", "A", "S", "D", "F", "G", "H", "J", "K", "L",
         "Semicolon", "Quote", null, "Enter", "PageDown"]
     },
@@ -67,7 +72,7 @@ var KEYMAP_SLOT_TABLE = {
         "Right"]
     }
   ],
-  "non_keycap_slots": [14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111]
+  "non_keycap_slots": [14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111]
 };
 // [KEYMAP-SLOT-TABLE-END]
 
@@ -90,9 +95,10 @@ KEYMAP_SLOT_TABLE.isNonKeycap = function (slot) {
 };
 
 // The EXACT set of slots that may render as clickable keycaps: visual slots
-// minus every keycap-less position. Slot 58 (and 55-59) is in NO visual row,
-// so no cap can ever bind to it; 14/72/92 and the row-6 spacers render as
-// invisible gaps.
+// minus every keycap-less position. Slot 58 (empirical Caps Lock, G11) heads
+// row 4; slots 55, 56, 57, 59 and 60 (the vendor-table caps duplicate) are in
+// NO visual row, so no cap can ever bind to them; 14/72/92 and the row-6
+// spacers render as invisible gaps.
 KEYMAP_SLOT_TABLE.clickableSlots = function () {
   return KEYMAP_SLOT_TABLE.allVisualSlots().filter(function (slot) {
     return !KEYMAP_SLOT_TABLE.isNonKeycap(slot);

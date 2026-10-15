@@ -267,7 +267,8 @@ KNOWN_FACTORY_KEYS = {
     41: 0x14,  # Q
     50: 0x13,  # P
     54: 0x4B,  # PgUp (R2)
-    60: 0x39,  # Caps Lock
+    58: 0xFF,  # vendor says "unassigned spare" — G11: the EMPIRICAL CapsLock cell; vendor table is WRONG here
+    60: 0x39,  # Caps Lock per the VENDOR table (hidden duplicate; firmware caps = 58, G11)
     61: 0x04,  # A
     73: 0x28,  # Enter
     74: 0x4E,  # PgDn (R3)
@@ -808,8 +809,13 @@ def test_shipped_default_types_agree_with_the_slot_map() -> None:
     assert FACTORY_TABLE[14] == 0x02  # KEYMAP_MAP.md: vendor-internal knob/mute byte
     ff_slots = {slot for slot, value in enumerate(types) if value == 0xFF}
     unlabeled = {slot for slot in range(KEYMAP_SLOTS) if slot not in KEYMAP_SLOT_LABELS}
-    assert unlabeled - ff_slots == {14, 72, 92}  # matrix artifacts, not spares
+    # 14/72/92: matrix artifacts, not spares. 60: intentionally UNLABELED by
+    # G11 — the vendor table's Caps Lock cell (type 0x01, byte 0x39) with no
+    # empirical identity on the WB5092 firmware (real caps cell = 58); it is
+    # hidden, not a keycap, so it earns no label.
+    assert unlabeled - ff_slots == {14, 60, 72, 92}
     assert types[14] == 0x03 and types[72] == 0x01 and types[92] == 0x01
+    assert types[60] == 0x01 and types[58] == 0xFF  # G11 byte+type facts
     assert len(ff_slots) == 35
 
 

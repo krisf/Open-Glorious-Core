@@ -62,16 +62,18 @@ KEYMAP_BLANK_MIRROR_SIGNATURE = "no parsable profile/layer"
 #     ← ↓ →`; row-6 table lines 178-186 mark them `*(unassigned spare)*`
 #     with factory code 0xFF — verified against the packaged fixture
 #     data/default_keymap.bin: bytes 103/104/106/107/111 == 0xFF).
-#   * 55, 56, 57, 58, 59 — the head of the row-4 USB block, BEFORE Caps Lock
-#     (G10, the class G9 missed). KEYMAP_MAP.md lines 115-119: the row-3 table
-#     lists all five as `*(unassigned spare)*`, and the factory bytes agree —
-#     data/default_keymap.bin[55..59] are all 0xFF while the REAL CapsLock is
-#     slot 60 = 0x39 (KEYMAP_MAP.md line 125). Physical proof: an operator
-#     write of 0x59 to slot 58 via the GUI's "Caps Lock" cap landed
-#     (`ok: true`, one cmd 0x03 matrix) and did NOTHING on the board — no
-#     numpad-1 ever appeared at that position because there is NO keycap
-#     there (the user's dead-write test, G10_UI_TARGET_PLAN.md).
-NON_KEYCAP_SLOTS = frozenset({14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111})
+#   * 55, 56, 57, 59 — the head of the row-4 USB block, BEFORE Caps Lock:
+#     factory 0xFF cells with no empirical identity (KEYMAP_MAP.md lines
+#     115-119; data/default_keymap.bin[55..57,59] are 0xFF).
+#   * 60 — the vendor Buttoninfo_Default's CapsLock cell (factory 0x39). G11
+#     operator proof on this WB5092 firmware (320F:5092, 2026-10-15): the
+#     physical CapsLock cell is slot 58 — pushing the factory vector (0xFF at
+#     58) killed CapsLock and a recovery write of 0x39 to 58 restored it,
+#     while every write aimed at 60 did nothing. Slot 60 therefore has no
+#     empirical identity: it carries a harmless duplicate 0x39, is hidden from
+#     the grid like the 55/56/57/59 cells, and must NOT be touched without an
+#     operator-confirmed plan.
+NON_KEYCAP_SLOTS = frozenset({14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111})
 KEYMAP_BLANK_MIRROR_MESSAGE = (
     "Config mirror is blank (shadow buffer never populates on this wireless "
     "board post-factory-reset); showing packaged factory defaults. Writes "
@@ -130,6 +132,9 @@ def build_matrix_self_test_report(
         "MATRIX SELF-TEST — read-only scan of the config mirror (GET only, "
         "ZERO writes).",
         f"Source: {source_label}",
+        "G11 empirical firmware truth (WB5092, operator-verified): CapsLock = "
+        "slot 58; the vendor table (58=0xFF, 60=0x39) is wrong — a live 0x39 "
+        "at 58 is the working caps cell, NOT a deviation.",
     ]
     lines.extend(f"NOTE: {note}" for note in notes)
     lines.append("")
@@ -150,18 +155,22 @@ def build_matrix_self_test_report(
     lines.append("")
     lines.append("Keycap-less slots (never rendered, bound to NO cap):")
     lines.append("  14, 72, 92                 matrix artifacts (KEYMAP_MAP.md 32-42)")
-    lines.append("  55, 56, 57, 58, 59         head of row-4 block, factory 0xFF "
-                 "(KEYMAP_MAP.md 115-119) — the G10 dead-write slots")
+    lines.append("  55, 56, 57, 59             head of row-4 block, factory 0xFF, "
+                 "no empirical identity — dead-write cells (G10)")
+    lines.append("  60                         vendor-table caps cell (factory 0x39): "
+                 "duplicate caps, no empirical identity — hidden, G11; do not touch "
+                 "without an operator-confirmed plan")
     lines.append("  103, 104, 106, 107, 111   row-6 spacers, factory 0xFF")
-    bound_58 = any(
-        slot == 58
+    hidden_no_cap = (55, 56, 57, 59, 60)
+    bound_hidden = any(
+        slot in hidden_no_cap
         for row in SLOT_TABLE["rows"]
         for slot, key in zip(row["slots"], row["keys"])
         if key is not None
     )
     lines.append(
-        f"Caps bound: {SELF_TEST_CAPS_BOUND}; slot 58 bound to a cap: "
-        f"{'YES — DEFECT' if bound_58 else 'NO'}"
+        f"Caps bound: {SELF_TEST_CAPS_BOUND}; slots 55-57, 59, 60 bound to a "
+        f"cap: {'YES — DEFECT' if bound_hidden else 'NO'}"
     )
     lines.append(
         "The mirror scan reports codes, not presses: physical aliveness of a "

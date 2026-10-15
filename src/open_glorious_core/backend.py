@@ -92,8 +92,13 @@ def locate_codes_table(response: bytes | bytearray) -> int:
     return KEYMAP_OFFSET + echo
 
 # slot -> physical key name for the GMMK Pro 75 % board (full derivation:
-# remap/KEYMAP_MAP.md). Slots 14 / 72 / 92 carry non-FF raw bytes in the factory
-# dump but have no confirmed keycap on this unit and are deliberately unlabeled.
+# remap/KEYMAP_MAP.md + its EMPIRICAL-FIRMWARE note). Slots 14 / 72 / 92 carry
+# non-FF raw bytes in the factory dump but have no confirmed keycap on this unit
+# and are deliberately unlabeled. G11: Caps Lock sits at slot 58 — the
+# operator-confirmed CapsLock cell on the WB5092 firmware; the vendor
+# Buttoninfo_Default puts 0x39 at 60 and is WRONG here, so 60 keeps no label:
+# no empirical identity, a hidden duplicate 0x39 — do not touch without an
+# operator-confirmed plan.
 KEYMAP_SLOT_LABELS: dict[int, str] = {
     **{0: "Esc"},
     **{i: f"F{i}" for i in range(1, 13)},
@@ -110,7 +115,7 @@ KEYMAP_SLOT_LABELS: dict[int, str] = {
     52: "RBracket",
     53: "Backslash",
     54: "PageUp",
-    60: "Caps Lock",
+    58: "Caps Lock",
     **{61 + i: c for i, c in enumerate("ASDFGHJKL")},
     70: "Semicolon",
     71: "Quote",

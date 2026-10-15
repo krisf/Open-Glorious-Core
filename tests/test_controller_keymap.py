@@ -205,24 +205,29 @@ def test_keystate_normal_device_shape(controller) -> None:
 
 
 def test_keystate_slots_carry_is_keycap_flag(controller) -> None:
-    """G9 FIX A + G10: every slot object carries the per-slot is_keycap
-    boolean; all 13 keycap-less matrix positions (G9's 8 plus the head-of-
-    block spares 55-59) are False, real keycaps True."""
+    """G9 FIX A + G10/G11: every slot object carries the per-slot is_keycap
+    boolean; all 13 keycap-less matrix positions (G9's 8, the head cells
+    55/56/57/59 and the hidden vendor caps duplicate 60) are False, real
+    keycaps — including the empirical CapsLock at 58 — are True."""
     ctrl, _ = controller
     slots = ctrl.get_keystate()["keymap"]["slots"]
     assert app_module.NON_KEYCAP_SLOTS == {
-        14, 55, 56, 57, 58, 59, 72, 92, 103, 104, 106, 107, 111
+        14, 55, 56, 57, 59, 60, 72, 92, 103, 104, 106, 107, 111
     }
     assert all("is_keycap" in slot for slot in slots)
     for slot in app_module.NON_KEYCAP_SLOTS:
         assert slots[slot]["is_keycap"] is False, slot
-    # G10 operator incident: the GUI's "Caps Lock" cap wrote slot 58 (0xFF
-    # spare, no physical key). Slots 55-59 are never advertised as keycaps.
-    for slot in (55, 56, 57, 58, 59):
+    # Head cells 55/56/57/59: factory 0xFF, no empirical identity, never caps.
+    for slot in (55, 56, 57, 59):
         assert slots[slot]["is_keycap"] is False, slot
         assert FACTORY[slot] == 0xFF, slot
-    # The REAL CapsLock is slot 60: a keycap, factory 0x39.
-    assert slots[60]["is_keycap"] is True
+    # G11 operator-confirmed: the CapsLock cell on this WB5092 firmware is
+    # slot 58 (keycap), even though the VENDOR dump puts 0xFF there.
+    assert slots[58]["is_keycap"] is True
+    assert FACTORY[58] == 0xFF, "vendor table lies at 58 (G11)"
+    # Slot 60 is the vendor table's Caps Lock cell (0x39): hidden, no
+    # empirical identity, bound to NO cap.
+    assert slots[60]["is_keycap"] is False
     assert FACTORY[60] == 0x39
     # Real keycaps around the row-6 spacers: LCtrl / Space / Fn / Left.
     for slot in (100, 105, 109, 112):
@@ -271,10 +276,11 @@ def test_keystate_blank_mirror_degrades_to_factory_defaults(monkeypatch: pytest.
     assert slots[0]["code"] == 0x29
     # Slots are the packaged factory table, never the blank device answer.
     assert [slot["code"] for slot in slots] == list(FACTORY)
-    # G9 FIX A: the keycap flag stamps on the degraded path too. G10: the
-    # head-of-block spares are excluded on the degraded path as well.
+    # G9 FIX A: the keycap flag stamps on the degraded path too. G11: the
+    # empirical CapsLock@58 is a keycap and the hidden cells (55/56/57/59/60)
+    # are not, exactly as on the live path — /api/keystate and the grid agree.
     assert slots[103]["is_keycap"] is False and slots[105]["is_keycap"] is True
-    assert slots[58]["is_keycap"] is False and slots[60]["is_keycap"] is True
+    assert slots[58]["is_keycap"] is True and slots[60]["is_keycap"] is False
     assert data["profile"] == 1 and data["layer"] == 1
     assert payload["message"] == BLANK_MIRROR_MESSAGE
 
@@ -477,12 +483,13 @@ def test_matrix_self_test_scans_mirror_with_zero_writes(controller) -> None:
     report = result["self_test"]
     assert report and report[0].startswith("MATRIX SELF-TEST")
     joined = "\n".join(report)
-    # The G10 incident facts are in the report: real CapsLock at slot 60.
-    caps_lines = [line for line in report if "Caps Lock" in line]
-    assert caps_lines and "slot  60" in caps_lines[0] and "0x39" in caps_lines[0]
+    # The G11 empirical facts are in the report: CapsLock scanned at slot 58.
+    caps_lines = [line for line in report if "Caps Lock" in line and "code 0x" in line]
+    assert caps_lines and "slot  58" in caps_lines[0] and "0xFF" in caps_lines[0]
     assert "as mapped" in caps_lines[0]
-    assert "slot 58 bound to a cap: NO" in joined
-    assert "55, 56, 57, 58, 59" in joined
+    assert "CapsLock = slot 58" in joined
+    assert "slots 55-57, 59, 60 bound to a cap: NO" in joined
+    assert "55, 56, 57, 59" in joined
     assert "Caps bound: 82" in joined
     # READ-ONLY contract: the only device traffic is the config-mirror GET.
     assert backend.calls_named("read_keymap")
@@ -497,14 +504,19 @@ def test_matrix_self_test_flags_deviations_and_dead_caps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = FakeBackend(codes=[
-        0x59 if slot == 60 else (0xFF if slot == 105 else FACTORY[slot])
+        0x59 if slot == 58 else (0xFF if slot == 105 else FACTORY[slot])
         for slot in range(KEYMAP_SLOTS)
     ])
     ctrl, _ = make_controller(monkeypatch, backend)
     report = ctrl.run_action(app_module.MATRIX_SELF_TEST_ACTION)["self_test"]
     lines = "\n".join(report)
-    caps_line = next(line for line in report if "Caps Lock" in line)
-    assert "0x59" in caps_line and "DEVIATES (factory 0x39)" in caps_line
+    caps_line = next(
+        line for line in report if "Caps Lock" in line and "code 0x" in line
+    )
+    # CapsLock scans at the empirical cell 58; 0x59 there is a deviation
+    # against the vendor byte (0xFF) — the scan stays byte-honest, G11.
+    assert "slot  58" in caps_line
+    assert "0x59" in caps_line and "DEVIATES (factory 0xFF)" in caps_line
     space_line = next(line for line in report if "Space" in line)
     assert "UNASSIGNED (0xFF) — keycap dead (factory 0x2C)" in space_line
     assert "DEVIATES" in lines
@@ -526,7 +538,9 @@ def test_matrix_self_test_blank_mirror_degrades_to_factory(
     joined = "\n".join(result["self_test"])
     assert "packaged factory defaults" in joined
     assert "NOTE: Config mirror is blank" in joined
-    caps_line = next(l for l in result["self_test"] if "Caps Lock" in l)
+    caps_line = next(
+        l for l in result["self_test"] if "Caps Lock" in l and "code 0x" in l
+    )
     assert "as mapped" in caps_line
     for writer in ("set_keymap_codes", "reset_keymap", "change_profile"):
         assert not backend.calls_named(writer), writer
@@ -595,5 +609,5 @@ def test_cli_flag_prints_report_and_exits_before_gui(
     out = capsys.readouterr().out
     assert "MATRIX SELF-TEST" in out
     assert "Caps Lock" in out
-    assert "slot 58 bound to a cap: NO" in out
+    assert "slots 55-57, 59, 60 bound to a cap: NO" in out
     assert not backend.calls_named("set_keymap_codes")
