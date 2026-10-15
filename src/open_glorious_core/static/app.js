@@ -614,6 +614,7 @@ const km = {
   profileGrid: document.getElementById("keymap-profile-grid"),
   grid: document.getElementById("keymap-grid"),
   editor: document.getElementById("keymap-editor"),
+  editorClose: document.getElementById("keymap-editor-close"),
   editorTitle: document.getElementById("keymap-editor-title"),
   editorNormal: document.getElementById("keymap-editor-normal"),
   editorUnassigned: document.getElementById("keymap-editor-unassigned"),
@@ -1129,6 +1130,36 @@ if (km.codeList) {
     item.classList.add("is-cursor");
   });
 }
+
+// G14 FIX 1: the drawer is a width-zero OVERLAY on the grid — dismissing it
+// (deselect the cap; renderKeymapEditor then hides the panel) is its only
+// affordance, so it must be reachable without hunting: the head close button
+// and the Escape key.
+function closeKeymapDrawer() {
+  if (keymap.selectedSlot == null) return;
+  keymap.selectedSlot = null;
+  renderKeymapGrid();
+  renderKeymapEditor();
+}
+if (km.editorClose) km.editorClose.addEventListener("click", () => closeKeymapDrawer());
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeKeymapDrawer();
+});
+
+// G14 FIX 3: boot at the TOP of the page. The web view restores the previous
+// mid-page scroll on launch (swatch row clipped under the header, scrollbar
+// thumb mid-trough), so pin the document (window.scrollTo, per spec) AND the
+// app's real scroll box (.workspace-shell) to the top: at boot, on the next
+// animation frame (runs after layout, before the user sees the restored
+// position), and once more on the window load event.
+function scrollAppToTop() {
+  window.scrollTo(0, 0);
+  const shell = document.querySelector(".workspace-shell");
+  if (shell) shell.scrollTop = 0;
+}
+scrollAppToTop();
+window.requestAnimationFrame(scrollAppToTop);
+window.addEventListener("load", scrollAppToTop);
 
 fetchState().catch((error) => {
   setText(els.statusMessage, `Failed to load state: ${error}`);

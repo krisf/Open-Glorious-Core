@@ -14,6 +14,10 @@
     --radius-lg: 22px;
     --radius-md: 16px;
     --sidebar-width: 240px;
+    /* G14 FIX 2: keycap scale — the 15-column grid spans the full panel, so
+       cap height tracks the viewport: 3.6vw across the 15 columns, clamped to
+       the G9 floor (46px) and a 62px ceiling. */
+    --keycap-h: clamp(46px, 3.6vw, 62px);
 }
 
 * {
@@ -140,6 +144,10 @@ output {
 .device-card span {
     color: var(--muted);
     font-size: 0.8rem;
+    /* G14 FIX 5: subtitle separators (hidraw path • backend) stay readable —
+       natural wrap inside the card, never clipped on one line. */
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .ghost-rail-button,
@@ -627,6 +635,10 @@ output {
 
 .keymap-body {
     display: grid;
+    /* G14 FIX 1: single column — the grid owns the FULL panel width; the
+       remap drawer overlays it (see the 960px media block), it never
+       reserves a right rail. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 18px;
 }
 
@@ -644,11 +656,12 @@ output {
     gap: 2px;
     /* G9 FIX B: uniform 1u cell — fixed height so long names never push
        row height, min-width 0 so 15 equal columns fit the panel, tightened
-       padding. */
+       padding. G14 FIX 2: the height scales with the panel via --keycap-h
+       (clamped), so a full-width grid gets useful caps, not 46px confetti. */
     min-width: 0;
     overflow: hidden;
-    height: 46px;
-    min-height: 46px;
+    height: var(--keycap-h);
+    min-height: var(--keycap-h);
     padding: 5px 6px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 9px;
@@ -672,10 +685,12 @@ output {
 }
 
 /* G9 FIX B: single-line labels with ellipsis, sized for 15 columns. Full
-   names stay available through the native HTML title tooltip. */
+   names stay available through the native HTML title tooltip. G14 FIX 2:
+   clamped fluid sizes — the ellipsis class of truncation ("Pr…", "Mi…")
+   disappears at the widths the full-width grid actually renders. */
 .keycap-label {
     max-width: 100%;
-    font-size: 0.62rem;
+    font-size: clamp(0.7rem, 0.95vw, 0.95rem);
     font-weight: 600;
     overflow: hidden;
     white-space: nowrap;
@@ -684,7 +699,7 @@ output {
 
 .keycap-code {
     max-width: 100%;
-    font-size: 0.55rem;
+    font-size: clamp(0.6rem, 0.8vw, 0.8rem);
     color: var(--muted);
     overflow: hidden;
     white-space: nowrap;
@@ -712,11 +727,14 @@ output {
 .keycap-spacer {
     visibility: hidden;
     min-width: 0;
-    min-height: 46px;
+    min-height: var(--keycap-h);
     border: 0;
     background: transparent;
 }
 
+/* G14 FIX 4: the grid is a single column of keymap-body, so the legend
+   footnote spans the FULL keymap width (it no longer wraps at a 300px-rail
+   grid width). */
 .keymap-legend {
     margin: 12px 0 0;
     color: var(--muted);
@@ -735,10 +753,38 @@ output {
     align-self: start;
 }
 
+.keymap-editor-head {
+    position: relative;
+    padding-right: 36px;
+}
+
 .keymap-editor-head h4 {
     margin: 4px 0 0;
     font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
     font-size: 1rem;
+}
+
+/* G14 FIX 1: the drawer is an overlay, so it needs its own dismiss control
+   (Escape is wired in app.js). */
+.keymap-editor-close {
+    position: absolute;
+    top: 2px;
+    right: 0;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--muted);
+    font-size: 1.05rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.keymap-editor-close:hover {
+    color: var(--text);
+    border-color: rgba(243, 154, 35, 0.5);
 }
 
 .keymap-editor-facts {
@@ -886,9 +932,26 @@ output {
     cursor: not-allowed;
 }
 
+/* G14 FIX 1: at desktop widths the remap drawer floats at the RIGHT EDGE of
+   keymap-body as an OVERLAY (absolute inside the positioned body, above the
+   grid, panel border + shadow, internal scroll) — it reserves ZERO layout
+   width; the grid keeps every pixel. Visible only while a cap is selected
+   (the G9 is-hidden state), dismissible with Escape / the head close button.
+   Below 960px the drawer stays the normal stacked block (simple path). */
 @media (min-width: 960px) {
     .keymap-body {
-        grid-template-columns: minmax(0, 1fr) 300px;
+        position: relative;
+    }
+
+    .keymap-editor {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 330px;
+        max-height: 100%;
+        overflow-y: auto;
+        z-index: 6;
+        box-shadow: -16px 20px 44px rgba(0, 0, 0, 0.5);
     }
 }
 
