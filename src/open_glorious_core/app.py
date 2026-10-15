@@ -45,6 +45,18 @@ KEYMAP_SWITCH_HINT = "switch-profile first"
 # read raises with this text. It is the parse-None signature /api/keystate
 # degrades on (factory defaults, ok:true), never a hard panel failure.
 KEYMAP_BLANK_MIRROR_SIGNATURE = "no parsable profile/layer"
+# Slots of the 120-slot matrix that carry NO physical keycap on this board
+# (G9 FIX A, single source of truth for the UI; remap/KEYMAP_MAP.md evidence):
+#   * 14, 72, 92 — the three raw-byte matrix artifacts ("Notes on the three
+#     unlabeled raw bytes", KEYMAP_MAP.md lines 32-42: knob area / ISO slot /
+#     phantom Menu slot; "no keycap here", "Leave alone"; row anatomy lines
+#     21, 24-25).
+#   * 103, 104, 106, 107, 111 — the five `··` spacer positions of the bottom
+#     row (row anatomy line 26: `LCtrl LWin LAlt ·· Space ·· RAlt Fn RCtrl ·
+#     ← ↓ →`; row-6 table lines 178-186 mark them `*(unassigned spare)*`
+#     with factory code 0xFF — verified against the packaged fixture
+#     data/default_keymap.bin: bytes 103/104/106/107/111 == 0xFF).
+NON_KEYCAP_SLOTS = frozenset({14, 72, 92, 103, 104, 106, 107, 111})
 KEYMAP_BLANK_MIRROR_MESSAGE = (
     "Config mirror is blank (shadow buffer never populates on this wireless "
     "board post-factory-reset); showing packaged factory defaults. Writes "
@@ -238,6 +250,10 @@ class OpenGloriousCoreWebController:
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
+                    # G9 FIX A: False for the 8 matrix positions that carry no
+                    # keycap (see NON_KEYCAP_SLOTS). The UI renders those as
+                    # invisible spacers — a "#NNN" label never appears.
+                    "is_keycap": entry.slot not in NON_KEYCAP_SLOTS,
                 }
             )
 

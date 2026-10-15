@@ -602,8 +602,14 @@ output {
     flex-direction: column;
     justify-content: space-between;
     gap: 2px;
-    min-height: 44px;
-    padding: 6px 7px;
+    /* G9 FIX B: uniform 1u cell — fixed height so long names never push
+       row height, min-width 0 so 15 equal columns fit the panel, tightened
+       padding. */
+    min-width: 0;
+    overflow: hidden;
+    height: 46px;
+    min-height: 46px;
+    padding: 5px 6px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 9px;
     background: rgba(255, 255, 255, 0.05);
@@ -625,13 +631,20 @@ output {
     border-color: transparent;
 }
 
+/* G9 FIX B: single-line labels with ellipsis, sized for 15 columns. Full
+   names stay available through the native HTML title tooltip. */
 .keycap-label {
-    font-size: 0.74rem;
+    max-width: 100%;
+    font-size: 0.62rem;
     font-weight: 600;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 .keycap-code {
-    font-size: 0.62rem;
+    max-width: 100%;
+    font-size: 0.55rem;
     color: var(--muted);
     overflow: hidden;
     white-space: nowrap;
@@ -653,12 +666,15 @@ output {
     background: var(--accent);
 }
 
-.keycap-no-keycap {
-    min-height: 44px;
-    border-style: dashed;
-    border-color: rgba(255, 255, 255, 0.07);
+/* G9 FIX A: matrix positions with no physical keycap — invisible spacers
+   that only preserve the 15-column row alignment (no border, no background,
+   no label, not interactive). */
+.keycap-spacer {
+    visibility: hidden;
+    min-width: 0;
+    min-height: 46px;
+    border: 0;
     background: transparent;
-    cursor: not-allowed;
 }
 
 .keymap-legend {
@@ -763,4 +779,37 @@ output {
     .keymap-body {
         grid-template-columns: minmax(0, 1fr) 300px;
     }
+}
+
+/* G9 FIX E: dark themed webkit scrollbars — the app scroll area and the
+   remap suggestion list must never peek native light scrollbars in the dark
+   panel. scrollbar-color covers non-webkit engines. */
+* {
+    scrollbar-color: rgba(243, 154, 35, 0.45) rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(243, 154, 35, 0.45);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(243, 154, 35, 0.7);
+    background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
 }

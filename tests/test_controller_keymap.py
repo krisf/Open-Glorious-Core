@@ -193,6 +193,26 @@ def test_keystate_normal_device_shape(controller) -> None:
     assert any(entry["code"] == 0xFF for entry in catalog)
 
 
+def test_keystate_slots_carry_is_keycap_flag(controller) -> None:
+    """G9 FIX A: every slot object carries the per-slot is_keycap boolean;
+    the 8 keycap-less matrix positions are False, real keycaps True."""
+    ctrl, _ = controller
+    slots = ctrl.get_keystate()["keymap"]["slots"]
+    assert app_module.NON_KEYCAP_SLOTS == {14, 72, 92, 103, 104, 106, 107, 111}
+    assert all("is_keycap" in slot for slot in slots)
+    for slot in app_module.NON_KEYCAP_SLOTS:
+        assert slots[slot]["is_keycap"] is False, slot
+    # Real keycaps around the row-6 spacers: LCtrl / Space / Fn / Left.
+    for slot in (100, 105, 109, 112):
+        assert slots[slot]["is_keycap"] is True, slot
+    # Fixture evidence for the five row-6 `··` spacers (KEYMAP_MAP.md 175-187):
+    # factory code 0xFF, no keycap.
+    for slot in (103, 104, 106, 107, 111):
+        assert FACTORY[slot] == 0xFF, slot
+    # Real caps are never 0xFF-flagged as spares: Space keeps its keycap.
+    assert FACTORY[105] == 0x2C
+
+
 def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     ctrl, _ = make_controller(monkeypatch, FakeBackend(codes=[0x00] * KEYMAP_SLOTS))
     payload = ctrl.get_keystate()
@@ -229,6 +249,8 @@ def test_keystate_blank_mirror_degrades_to_factory_defaults(monkeypatch: pytest.
     assert slots[0]["code"] == 0x29
     # Slots are the packaged factory table, never the blank device answer.
     assert [slot["code"] for slot in slots] == list(FACTORY)
+    # G9 FIX A: the keycap flag stamps on the degraded path too.
+    assert slots[103]["is_keycap"] is False and slots[105]["is_keycap"] is True
     assert data["profile"] == 1 and data["layer"] == 1
     assert payload["message"] == BLANK_MIRROR_MESSAGE
 

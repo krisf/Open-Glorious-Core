@@ -476,15 +476,21 @@ if (els.flashButton) {
 // ---------------------------------------------------------------------------
 // Key remapping panel (G7). Talks to GET /api/keystate and the apply-keymap /
 // reset-keymap / switch-profile actions. The matrix is 6 rows x 20 slots;
-// columns 16-20 are firmware spares (never rendered) and slots 14/72/92 carry
-// no keycap on this board (remap/KEYMAP_MAP.md), so the grid is 6 x 15.
+// columns 16-20 are firmware spares (never rendered). G9 FIX A: 8 of the
+// rendered slots carry NO physical keycap (per-slot `is_keycap` flag from
+// /api/keystate, app.NON_KEYCAP_SLOTS) and render as invisible spacers so the
+// 15-column row alignment is preserved — the grid stays 6 x 15.
 // ---------------------------------------------------------------------------
 
 const KEYMAP_ROWS = 6;
 const KEYMAP_COLS = 15;
 const KEYMAP_ROW_SLOTS = 20;
 const KEYMAP_SLOT_COUNT = 120;
-const KEYMAP_NO_KEYCAP = new Set([14, 72, 92]);
+// Offline mirror of app.NON_KEYCAP_SLOTS (remap/KEYMAP_MAP.md: slots 14/72/92
+// matrix artifacts + the five row-6 `··` spacers 103/104/106/107/111). Used
+// only when no /api/keystate payload is loaded yet; the payload's per-slot
+// `is_keycap` flag is the source of truth.
+const KEYMAP_NON_KEYCAP = new Set([14, 72, 92, 103, 104, 106, 107, 111]);
 const KEYMAP_GROUP_ORDER = [
   "alpha", "numeric", "punct", "fkeys", "modifiers", "nav",
   "media", "keypad", "editing", "system", "intl", "vendor", "other",
@@ -600,10 +606,14 @@ function renderKeymapMeta() {
     setText(km.dirtyCounter, "Writing to keyboard…");
     setText(km.writeButton, "Writing…");
     if (km.writeButton) km.writeButton.disabled = true;
+    toggleHidden(km.writeButton, false);
     return;
   }
   setText(km.dirtyCounter, `${count} unsaved change${count === 1 ? "" : "s"}`);
-  setText(km.writeButton, `Write ${count} key(s) to keyboard`);
+  // G9 FIX E: the write button only exists while there is something to write,
+  // and its label is grammatical (never "N key(s)").
+  setText(km.writeButton, `Write ${count} key${count === 1 ? "" : "s"} to keyboard`);
+  toggleHidden(km.writeButton, count === 0);
   if (km.writeButton) km.writeButton.disabled = count === 0 || !keymapIsEditable();
 }
 
@@ -635,14 +645,20 @@ function renderKeymapGrid() {
   for (let row = 0; row < KEYMAP_ROWS; row += 1) {
     for (let column = 0; column < KEYMAP_COLS; column += 1) {
       const slot = row * KEYMAP_ROW_SLOTS + column;
-      if (KEYMAP_NO_KEYCAP.has(slot)) {
-        const hole = document.createElement("span");
-        hole.className = "keycap keycap-no-keycap";
-        hole.title = `Slot ${slot}: no keycap (firmware matrix artifact, remap/KEYMAP_MAP.md)`;
-        km.grid.appendChild(hole);
+      const meta = keymapSlotMeta(slot);
+      // G9 FIX A: per-slot is_keycap from the payload (source of truth),
+      // mirrored offline by KEYMAP_NON_KEYCAP. A slot without a keycap is an
+      // INVISIBLE spacer: no border/background/label, not clickable, not
+      // tabbable — it only preserves the 15-column row alignment. Raw
+      // "#NNN" names never render anywhere.
+      const noKeycap = meta ? meta.is_keycap === false : KEYMAP_NON_KEYCAP.has(slot);
+      if (noKeycap) {
+        const spacer = document.createElement("div");
+        spacer.className = "keycap-spacer";
+        spacer.setAttribute("aria-hidden", "true");
+        km.grid.appendChild(spacer);
         continue;
       }
-      const meta = keymapSlotMeta(slot);
       const code = keymap.buffer ? keymap.buffer[slot] : (meta ? meta.code : 0xFF);
       const dirty = Boolean(keymap.buffer && keymap.baseline
         && keymap.buffer[slot] !== keymap.baseline[slot]);
@@ -652,11 +668,15 @@ function renderKeymapGrid() {
       button.classList.toggle("is-dirty", dirty);
       button.classList.toggle("is-selected", keymap.selectedSlot === slot);
       button.dataset.slot = String(slot);
-      const label = (meta && meta.physical) || `#${slot}`;
-      button.innerHTML = `
-        <span class="keycap-label">${label}</span>
-        <span class="keycap-code">${keymapCodeShort(code)}</span>
-      `;
+      const label = (meta && meta.physical) || "";
+      const labelEl = document.createElement("span");
+      labelEl.className = "keycap-label";
+      labelEl.textContent = label;
+      labelEl.title = label; // G9 FIX B: native tooltip with the full name
+      const codeEl = document.createElement("span");
+      codeEl.className = "keycap-code";
+      codeEl.textContent = keymapCodeShort(code);
+      button.append(labelEl, codeEl);
       button.title = `Slot ${slot} · ${keymapCodeName(code)}`
         + (meta ? ` · ${meta.code_type_label}` : "")
         + (dirty ? " · unsaved change" : "");
