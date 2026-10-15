@@ -115,3 +115,52 @@ The script self-gates: pre-flight health check before every probe, exact-once se
 `probe_0x81_baseline.txt` sane (profile/layer 1–3 each), keyboard visually unchanged,
 `read_state()` returns sane values, no `abort` lines beyond expected history in
 `probe_results.jsonl`.
+
+## OPERATOR RUN — Batch 1 sweep executed by Hermes (2026-10-15 ~01:05 UTC)
+
+Per the operator amendment: DSH wrote the tooling, Hermes ran it on the rig where
+/dev/hidraw3 lives. Executed: `--run --baseline-only`, `--run --limit 20`,
+`--run --skip-probed` (total: baseline ×12 healthy, all 29 candidates probed).
+
+### Result: ZERO side effects + the config mirror found
+
+- Every probe = one SET(cmd c, profile 1, layer 1) + one GET. **All 29 GET responses
+  are byte-identical to the pre-sweep baseline** (sha256-verified across all records).
+  Interpretation: for this device, hidraw GET on report 7 does NOT execute the
+  candidate command — it MIRRORS the active profile's full config buffer. The sweep
+  is therefore read-side-inert by construction (SET goes nowhere without a valid
+  command, GET ignores the request entirely).
+- The mirror payload (256 B) decodes cleanly against the known live state:
+  - `[0]=01 [1]=01` → active profile/layer (matches cmd-129 parse: 1,1)
+  - `[6]=0x14 [7]=0x14` → brightness on the 0–200 scale: 0x14=20 ≙ the 10 % white
+    brightness the user set on 10-14 (new value AND something at [7] track it)
+  - `0x26`=…`=01`, `0x1F/0x21/0x27`=ff sentinel bytes (RGB state region)
+  - **0x80–0xF7: a 1-byte-per-key USB HID scancode table in physical key order.**
+    Verified row-by-row against the GMMK Pro 75 % layout: `29`=Esc, `3a–45`=F1–F12,
+    `35`=grave, `1e–27`=1…0, `2b`=Tab, `14…13`=QWERTYUIOP, `04…0f`=ASDFGHJKL,
+    `1d…10`=ZXCVBNM, `e1/e0/e3/e2/e4/e5/e6`=modifiers, `2c`=Space, `50/51/4f`=arrows,
+    `4b/4e/4d`=PgUp/PgDn/nav, `4c`=Del, `28`=Enter, `2a`=Bksp. `ff` = unassigned slot.
+  - Trailing `0xF8…=00` tail = spare/extension space.
+
+### Hypotheses (first real ones — data exists now)
+
+- **H1 (STRONG): the keymap table in the mirror (0x80–0xF7) is the live onboard
+  keymap, and the remap WRITE path is the existing profile-update command (cmd 1)
+  with a FULL 256-byte payload** — i.e. cmd 1 = "write config", where zero bytes in
+  the payload mean "keep current" (this is consistent with the shipped RGB setters:
+  they send cmd 1 with mostly-zero payloads and the device keeps everything except
+  what they set). CORE's remap UI would simply ship a payload whose 0x80–0xF7 bytes
+  differ. Testable WITHOUT any behavior change: send cmd 1 carrying the current
+  mirror bytes with ONE keymap byte changed to its own current value (no-op write);
+  verify the mirror still reads identical. Then the real micro-write + revert.
+- **H2 (fallback): a dedicated remap command exists in 0x20–0x7E** (not yet swept).
+  H1 gets tested first because it requires no new command and no dangerous probing.
+- The mirror semantics ALSO give P2 its read-back verifier for free: `read_keymap()`
+  = GET report 7, slice 0x80–0xF7; write verification = re-GET and compare bytes.
+
+### Batch 2 plan (pending operator/user go)
+
+1. H1 no-op write test (safest possible first write — writes current values back).
+2. H1 micro-write smoke: one harmless key → new scancode, mirror-verified, reverted,
+   mirror-verified again. Requires user approval (physical confirmation of the key).
+3. Only if H1 fails: sweep 0x20–0x7E with the same proven-inert probe tooling.
