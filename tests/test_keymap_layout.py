@@ -742,8 +742,18 @@ def test_reset_keymap_restores_factory_table(
     assert len(dev.writes) == 2
     reset_payload = dev.writes[-1]
     assert reset_payload[0] == 7 and reset_payload[1] == CMD_KEY_MATRIX
-    assert bytes(reset_payload[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS]) == FACTORY_TABLE
-    assert bytes(reset_payload[KEYMAP_TYPES_OFFSET : KEYMAP_TYPES_OFFSET + KEYMAP_SLOTS]) == DEFAULT_TYPES
+    # G12: reset writes the factory table through the EMPIRICAL overlay —
+    # codes[58]=0x39 / types[58]=0x01 (raw vendor 0xFF @58 physically kills
+    # CapsLock on this firmware; remap/KEYMAP_MAP.md EMPIRICAL-FIRMWARE).
+    reset_codes = bytes(reset_payload[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS])
+    reset_types = bytes(reset_payload[KEYMAP_TYPES_OFFSET : KEYMAP_TYPES_OFFSET + KEYMAP_SLOTS])
+    expected_reset_codes = bytearray(FACTORY_TABLE)
+    expected_reset_codes[58] = 0x39
+    expected_reset_types = bytearray(DEFAULT_TYPES)
+    expected_reset_types[58] = 0x01
+    assert reset_codes == bytes(expected_reset_codes)
+    assert reset_types == bytes(expected_reset_types)
+    assert reset_codes[58] == 0x39 and reset_types[58] == 0x01
     after = {e.slot: e.scancode for e in backend.read_keymap()}
     assert after[13] == 0x46
 
@@ -758,7 +768,12 @@ def test_reset_keymap_writes_factory_table_regardless_of_current_state(
     with pytest.raises(BackendError, match="slot 13"):  # verify sees 0x68 vs factory 0x46
         backend.reset_keymap()
     assert len(dev.writes) == 1
-    assert bytes(dev.writes[0][KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS]) == FACTORY_TABLE
+    # G12: same EMPIRICAL overlay on the reset payload (slot 58 = 0x39).
+    reset_codes = bytes(dev.writes[0][KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS])
+    expected_reset_codes = bytearray(FACTORY_TABLE)
+    expected_reset_codes[58] = 0x39
+    assert reset_codes == bytes(expected_reset_codes)
+    assert reset_codes[58] == 0x39
 
 
 # ---------------------------------------------------------------------------

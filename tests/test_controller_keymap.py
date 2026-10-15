@@ -23,6 +23,11 @@ from open_glorious_core.device import HidDevice
 
 ROOT = Path(__file__).resolve().parents[1]
 FACTORY = (ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin").read_bytes()
+# G12 item 6: the keystate factory-defaults degradation displays slot 58 with
+# the EMPIRICAL overlay (Caps Lock 0x39 · normal), not the vendor "Unassigned
+# (0xFF)" — the misreading that hid the G11 kill. Display + write overlay
+# only; FACTORY itself stays the raw vendor bytes.
+FACTORY_DISPLAY = bytes(bytearray(FACTORY)[:58] + b"\x39" + bytearray(FACTORY)[59:])
 TYPES = (ROOT / "src" / "open_glorious_core" / "data" / "default_types.bin").read_bytes()
 
 DEVICE = HidDevice(
@@ -247,8 +252,11 @@ def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.Monke
     data = payload["keymap"]
     assert data["source"] == "factory-default"
     assert data["is_dirty_source"] is True
-    # The blank shadow is NEVER displayed: packaged factory bytes instead.
-    assert [slot["code"] for slot in data["slots"]] == list(FACTORY)
+    # The blank shadow is NEVER displayed: packaged factory bytes instead,
+    # with the G12 empirical overlay at slot 58 (Caps Lock 0x39, not 0xFF).
+    assert [slot["code"] for slot in data["slots"]] == list(FACTORY_DISPLAY)
+    assert data["slots"][58]["code_name"] == "Caps Lock (0x39)"
+    assert data["slots"][58]["code_type_label"] == "normal"
     assert data["slots"][0]["code_name"] == "Escape (0x29)"
     assert payload["message"].startswith(BANNER)
     assert "physical key test" in payload["message"]
@@ -274,8 +282,18 @@ def test_keystate_blank_mirror_degrades_to_factory_defaults(monkeypatch: pytest.
     assert len(slots) == KEYMAP_SLOTS == 120
     assert slots[0]["slot"] == 0
     assert slots[0]["code"] == 0x29
-    # Slots are the packaged factory table, never the blank device answer.
-    assert [slot["code"] for slot in slots] == list(FACTORY)
+    # Slots are the packaged factory table (G12 empirical overlay at 58:
+    # Caps Lock 0x39 · normal), never the blank device answer.
+    assert [slot["code"] for slot in slots] == list(FACTORY_DISPLAY)
+    assert slots[58]["code"] == 0x39
+    assert slots[58]["code_name"] == "Caps Lock (0x39)"
+    assert slots[58]["code_type_label"] == "normal"
+    assert slots[58]["factory_code"] == 0xFF  # raw vendor byte stays visible
+    # The drawer/tooltip composition the plan pins (built in JS from these):
+    assert (
+        f"Slot 58 · {slots[58]['code_name']} · {slots[58]['code_type_label']}"
+        == "Slot 58 · Caps Lock (0x39) · normal"
+    )
     # G9 FIX A: the keycap flag stamps on the degraded path too. G11: the
     # empirical CapsLock@58 is a keycap and the hidden cells (55/56/57/59/60)
     # are not, exactly as on the live path — /api/keystate and the grid agree.
