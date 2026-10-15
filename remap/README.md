@@ -21,7 +21,7 @@ PLAN.md HARD SAFETY RULE 3. This phase (P0) touched **no device**.
 | `KEYMAP_MAP.md` | P2 | ✅ present | All 120 keymap slots → physical key names, derived from the real factory dump; the 3 unconfirmed raw bytes (14/72/92) flagged DANGER. |
 | `default_keymap.bin` | P2 | ✅ present | 120-byte factory keymap table captured from the device (reset source of truth; packaged copy in `src/open_glorious_core/data/default_keymap.bin`, asserted equal by tests). |
 | `../tests/fixtures/mirror_profile11.bin` | P2 | ✅ present | Full 256-byte factory config-mirror fixture (first baseline record verbatim) — keymap tests run against the real dump, no device. |
-| `smoke_setkeymap.py` | P2 | ✅ present (operator-pending) | Single-key smoke + `--revert`, `--run`-gated with `WRITE` confirmation; prints full request/response hex + PASS/FAIL; refuses slots 14/72/92; dry-run verified. |
+| `smoke_setkeymap.py` | P2 | ✅ present (operator-pending) | Single-key smoke + `--revert` + `--factory-init` (virgin-buffer recovery after the official factory-reset hotkey: refuses unless the whole 0x80-0xF7 table reads 0x00, then one cmd-1 write of the factory capture image + read-back byte-compare + header (1,1) check), `--run`-gated with `WRITE` confirmation; prints full request/response hex + PASS/FAIL; single-key mode refuses slots 14/72/92 (N/A for `--factory-init` — payload is the factory image); dry-run verified. |
 | `SMOKE.md` | P2 | ⏳ placeholder | Operator-pasted smoke test output (gate G3). |
 
 **P1 batch-1 note (2026-10-15, 01:03 UTC):** sweep ran 0 device exchanges — the
