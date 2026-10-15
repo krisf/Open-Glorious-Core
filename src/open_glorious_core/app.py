@@ -33,7 +33,7 @@ from .keycodes import (
 )
 
 STATIC_DIR = Path(__file__).with_name("static")
-ICON_PATH = STATIC_DIR / "assets" / "glorious-core.ico"
+ICON_PATH = STATIC_DIR / "assets" / "open-glorious-core-icon.ico"
 DATA_DIR = Path(__file__).with_name("data")
 HOST = "127.0.0.1"
 

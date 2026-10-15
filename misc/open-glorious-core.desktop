@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Open Glorious Core (GMMK Pro)
+Comment=GMMK Pro lighting + key remapping on stock firmware (Linux)
+Exec=open-glorious-core
+Icon=open-glorious-core
+Terminal=false
+Categories=Utility;Hardware;
+Keywords=keyboard;glorious;gmmk;remap;keymap;peripherals;
