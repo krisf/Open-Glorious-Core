@@ -70,3 +70,16 @@ it for device-free construction.
 - INCIDENT 2026-10-15 01:09 UTC (out of scope, infra): vLLM :8180 (DSH backend) went
   DOWN mid-plan (radiance-qfn exited 1 on 0.0.0.0:8180 bind collision after an earlier
   crash). Restart via swap.sh radiance in progress; DSH work resumed after recovery.
+- G2 (Phase 2 coding) PASS 2026-10-15: DSH authored (commit cf0bc4d) after 3 aborted
+  attempts (engine-port thrash — see PLAN.md incident log). Operator verification:
+  independent pytest re-run 46/46 green (0.03s); fixture provenance byte-exact
+  (tests/fixtures/mirror_profile11.bin == first baseline record of
+  probe_results.jsonl; src/open_glorious_core/data/default_keymap.bin ==
+  fixture[0x80:0xF8], 120 slots, Esc=0x29 F1-F12=Pscr head matches decode);
+  read_keymap (PROVEN mirror path) + set_keymap/reset_keymap (H1 write, isolated in
+  _build_keymap_write_payload, read-back verifier, BackendError on mismatch);
+  remap/KEYMAP_MAP.md = 120-slot decode (6 rows x 20, 15 used + 5 spare, slots
+  14/72/92 flagged unconfirmed); remap/smoke_setkeymap.py properly gated (refuses
+  without --run/--dry-run, DANGER_SLOTS blocked, factory-byte --revert).
+  REMAINING: H1 device smoke (operator-gated single-key remap + revert) — awaiting
+  operator/user go.
