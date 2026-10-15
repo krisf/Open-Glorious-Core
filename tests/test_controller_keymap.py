@@ -1,0 +1,364 @@
+"""G7 Commit 3 — keymap controller API tests (GET /api/keystate + POST actions).
+
+No Qt, no HTTP server, no device: the controller is exercised directly with a
+stub backend swapped in via ``app.create_backend`` and ``detect_gmmk_pro``
+monkeypatched (conftest keeps real HID IO hard-blocked).
+"""
+from __future__ import annotations
+
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from open_glorious_core import app as app_module
+from open_glorious_core.backend import (
+    KEYMAP_SLOTS,
+    BackendError,
+    KeymapEntry,
+)
+from open_glorious_core.device import HidDevice
+
+ROOT = Path(__file__).resolve().parents[1]
+FACTORY = (ROOT / "src" / "open_glorious_core" / "data" / "default_keymap.bin").read_bytes()
+TYPES = (ROOT / "src" / "open_glorious_core" / "data" / "default_types.bin").read_bytes()
+
+DEVICE = HidDevice(
+    hidraw="/dev/hidraw-test",
+    name="GMMK Pro",
+    vendor_id=0x218B,
+    product_id=0x0A2B,
+    physical_id="test-1",
+    interface_id=2,
+)
+
+SHADOW_TAIL = (
+    "device mirror is blank so read-back could not verify — physical key "
+    "test is the only confirmation."
+)
+BANNER = "Device buffer not initialized — showing factory default"
+
+
+class FakeBackend:
+    """Records every call; asserts each runs under the controller IO lock."""
+
+    name = "Fake GMMK Pro"
+    COLOR_NAMES = ["red"]
+    EFFECT_LABELS = {}
+    EFFECT_COLOR_GROUPS = {}
+
+    def __init__(self, codes=None, available: bool = True) -> None:
+        self.profile = 1
+        self.layer = 1
+        self.codes = list(FACTORY) if codes is None else list(codes)
+        self.available = available
+        self.calls: list[tuple] = []
+        self.lock: threading.Lock | None = None  # wired to the controller lock
+
+    # -- helpers ----------------------------------------------------------
+    def _note(self, name: str, *args) -> None:
+        # The lock must be held: threading.Lock is non-reentrant, so a
+        # locked() check from inside a backend call proves serialization.
+        assert self.lock is not None and self.lock.locked(), (
+            f"{name} ran outside the controller IO lock"
+        )
+        self.calls.append((name, *args))
+
+    def calls_named(self, name: str) -> list[tuple]:
+        return [call for call in self.calls if call[0] == name]
+
+    # -- availability surface ---------------------------------------------
+    def is_available(self) -> bool:
+        return self.available
+
+    def install_hint(self) -> str:
+        return "Fake install hint."
+
+    def read_state(self):
+        self._note("read_state")
+        time.sleep(0.001)
+        return SimpleNamespace(
+            brightness=100, effect=0, speed=50, hue=0, saturation=0,
+            red=255, green=255, blue=255,
+        )
+
+    # -- keymap surface -----------------------------------------------------
+    def read_keymap(self, profile: int = 1, layer: int = 1):
+        self._note("read_keymap", profile, layer)
+        time.sleep(0.001)
+        return [KeymapEntry(slot=slot, scancode=self.codes[slot]) for slot in range(KEYMAP_SLOTS)]
+
+    def default_keymap_table(self) -> bytes:
+        return FACTORY
+
+    def set_keymap_codes(self, profile: int, layer: int, codes: bytes) -> str:
+        self._note("set_keymap_codes", profile, layer, bytes(codes))
+        time.sleep(0.001)
+        self.codes = list(codes)
+        return (
+            f"Wrote the full {KEYMAP_SLOTS}-slot key matrix to profile {profile} "
+            f"layer {layer} (cmd 3 KeyMatrix); " + SHADOW_TAIL
+        )
+
+    def reset_keymap(self, profile: int, layer: int) -> str:
+        self._note("reset_keymap", profile, layer)
+        return (
+            f"Wrote the factory default keymap to profile {profile} layer {layer} "
+            f"(cmd 3 KeyMatrix); " + SHADOW_TAIL
+        )
+
+    def change_profile(self, profile: int, layer: int) -> str:
+        self._note("change_profile", profile, layer)
+        self.profile, self.layer = profile, layer
+        return f"Switched to profile {profile} layer {layer}."
+
+    # -- RGB surface (regression: lock wraps existing actions too) ----------
+    def set_brightness(self, value: int, sync: bool) -> str:
+        self._note("set_brightness", value, sync)
+        return f"Brightness set to {value}."
+
+
+def make_controller(monkeypatch: pytest.MonkeyPatch, backend: FakeBackend):
+    monkeypatch.setattr(app_module, "create_backend", lambda: backend)
+    controller = app_module.OpenGloriousCoreWebController()
+    backend.lock = controller._io_lock
+    monkeypatch.setattr(app_module, "detect_gmmk_pro", lambda: [DEVICE])
+    return controller, backend
+
+
+@pytest.fixture()
+def controller(monkeypatch: pytest.MonkeyPatch):
+    return make_controller(monkeypatch, FakeBackend())
+
+
+# ---------------------------------------------------------------------------
+# GET /api/keystate
+# ---------------------------------------------------------------------------
+
+
+def test_keystate_normal_device_shape(controller) -> None:
+    ctrl, _ = controller
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is True
+    assert payload["backend"] == "Fake GMMK Pro"
+    assert payload["devices"][0]["hidraws"] == ["/dev/hidraw-test"]
+    data = payload["keymap"]
+    assert data["profile"] == 1 and data["layer"] == 1
+    assert data["source"] == "device"
+    assert data["is_dirty_source"] is False
+    assert data["active_profile"] == 1 and data["active_layer"] == 1
+    assert "profile 1 layer 1" in payload["message"]
+
+    slots = data["slots"]
+    assert len(slots) == KEYMAP_SLOTS
+    esc = slots[0]
+    assert esc["slot"] == 0
+    assert esc["code"] == 0x29
+    assert esc["code_name"] == "Escape (0x29)"
+    assert esc["physical"] == "Esc"
+    assert esc["code_type_label"] == "normal"
+    assert esc["is_unassigned"] is False
+    assert esc["factory_code"] == 0x29
+    # Packaged types table drives the labels (slot 14 consumer, slot 80
+    # modifier, slot 15 spare unused).
+    assert slots[14]["code_type_label"] == "consumer"
+    assert slots[80]["code_type_label"] == "modifier"
+    assert slots[15]["code_type_label"] == "unused"
+    assert TYPES[80] == 0x02  # ground truth for the assertion above
+
+    switch = data["can_switch"]
+    assert len(switch) == 9
+    active = [entry for entry in switch if entry["active"]]
+    assert len(active) == 1 and (active[0]["profile"], active[0]["layer"]) == (1, 1)
+    for entry in switch:
+        if not entry["active"]:
+            assert entry["hint"] == "switch-profile first"
+
+    catalog = payload["codes"]
+    assert catalog, "code catalog must ship for the UI dropdown"
+    letter_a = next(entry for entry in catalog if entry["code"] == 0x04)
+    assert letter_a == {"code": 0x04, "name": "A (0x04)", "group": "alpha", "target_type": 0x01}
+    assert any(entry["code"] == 0xFF for entry in catalog)
+
+
+def test_keystate_shadow_mirror_shows_factory_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctrl, _ = make_controller(monkeypatch, FakeBackend(codes=[0x00] * KEYMAP_SLOTS))
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is True
+    data = payload["keymap"]
+    assert data["source"] == "factory-default"
+    assert data["is_dirty_source"] is True
+    # The blank shadow is NEVER displayed: packaged factory bytes instead.
+    assert [slot["code"] for slot in data["slots"]] == list(FACTORY)
+    assert data["slots"][0]["code_name"] == "Escape (0x29)"
+    assert payload["message"].startswith(BANNER)
+    assert "physical key test" in payload["message"]
+
+
+def test_keystate_no_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = FakeBackend()
+    ctrl, _ = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(app_module, "detect_gmmk_pro", lambda: [])
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is False
+    assert payload["keymap"] is None
+    assert payload["devices"] == []
+    assert "No GMMK Pro detected" in payload["message"]
+    # No device => never touches the HID surface.
+    assert backend.calls == []
+
+
+def test_keystate_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctrl, _ = make_controller(monkeypatch, FakeBackend(available=False))
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is False
+    assert payload["keymap"] is None
+    assert payload["message"] == "Fake install hint."
+
+
+def test_keystate_backend_error_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = FakeBackend()
+
+    def boom(profile=1, layer=1):
+        raise BackendError("mirror read exploded")
+
+    ctrl, _ = make_controller(monkeypatch, backend)
+    monkeypatch.setattr(backend, "read_keymap", boom)
+    payload = ctrl.get_keystate()
+    assert payload["ok"] is False
+    assert payload["keymap"] is None
+    assert "mirror read exploded" in payload["message"]
+
+
+# ---------------------------------------------------------------------------
+# POST actions: routing, validation, passthrough
+# ---------------------------------------------------------------------------
+
+
+def test_apply_keymap_valid_writes_full_table(controller) -> None:
+    ctrl, backend = controller
+    new_codes = list(FACTORY)
+    new_codes[0] = 0x68
+    result = ctrl.run_action("apply-keymap", {"codes": new_codes})
+    assert result["ok"] is True
+    assert result["message"].startswith("Wrote the full 120-slot key matrix to profile 1 layer 1")
+    writes = backend.calls_named("set_keymap_codes")
+    assert writes == [("set_keymap_codes", 1, 1, bytes(new_codes))]
+    # Response is a full state payload (get_state) + the backend message.
+    assert result["state"]["brightness"] == 100
+
+
+def test_apply_keymap_validation(controller) -> None:
+    ctrl, backend = controller
+    bad = [
+        None,
+        {"codes": "not a list"},
+        {"codes": [0x04] * (KEYMAP_SLOTS - 1)},
+        {"codes": [0x04] * (KEYMAP_SLOTS + 1)},
+        {"codes": [0x100] * KEYMAP_SLOTS},
+        {"codes": [-1] + [0x04] * (KEYMAP_SLOTS - 1)},
+        {"codes": [True] * KEYMAP_SLOTS},
+        {"codes": ["0x04"] * KEYMAP_SLOTS},
+    ]
+    for value in bad:
+        result = ctrl.run_action("apply-keymap", value)
+        assert result["ok"] is False, value
+        assert "120 integer codes" in result["message"]
+    assert backend.calls_named("set_keymap_codes") == []
+
+
+def test_reset_keymap_targets_active_pair(controller) -> None:
+    ctrl, backend = controller
+    backend.profile, backend.layer = 2, 3
+    result = ctrl.run_action("reset-keymap")
+    assert result["ok"] is True
+    assert result["message"].startswith("Wrote the factory default keymap to profile 2 layer 3")
+    assert backend.calls_named("reset_keymap") == [("reset_keymap", 2, 3)]
+
+
+def test_switch_profile_routing(controller) -> None:
+    ctrl, backend = controller
+    assert ctrl.run_action("switch-profile", "2,3")["ok"] is False
+    assert ctrl.run_action("switch-profile", {"profile": 4, "layer": 1})["ok"] is False
+    assert ctrl.run_action("switch-profile", {"profile": 0, "layer": 3})["ok"] is False
+    assert ctrl.run_action("switch-profile", {"profile": "x", "layer": 1})["ok"] is False
+    assert ctrl.run_action("switch-profile", {"profile": 2, "layer": 2})["ok"] is True
+    assert backend.calls_named("change_profile") == [("change_profile", 2, 2)]
+    assert (backend.profile, backend.layer) == (2, 2)
+
+
+def test_unknown_action_rejected(controller) -> None:
+    ctrl, backend = controller
+    result = ctrl.run_action("launch-missiles")
+    assert result["ok"] is False
+    assert "Unknown action" in result["message"]
+    assert backend.calls == []
+
+
+def test_rgb_action_now_locked_and_unchanged(controller) -> None:
+    ctrl, backend = controller
+    result = ctrl.run_action("set_brightness", "50")
+    assert result["ok"] is True
+    assert result["message"] == "Brightness set to 50."
+    assert backend.calls_named("set_brightness") == [("set_brightness", 50, True)]
+
+
+def test_backend_error_action_becomes_ok_false(controller) -> None:
+    ctrl, backend = controller
+    backend.available = False
+    backend.profile, backend.layer = 1, 1
+
+    def boom(profile=1, layer=1):
+        raise BackendError("device vanished mid-write")
+
+    setattr(backend, "reset_keymap", boom)
+    result = ctrl.run_action("reset-keymap")
+    assert result["ok"] is False
+    assert "device vanished mid-write" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# IO lock: serialization, no deadlock
+# ---------------------------------------------------------------------------
+
+
+def test_lock_serializes_concurrent_requests(controller) -> None:
+    ctrl, backend = controller
+    errors: list[BaseException] = []
+    done = threading.Event()
+
+    def worker(index: int) -> None:
+        try:
+            for _ in range(3):
+                assert ctrl.get_keystate()["ok"] is True
+                if index % 2:
+                    assert ctrl.run_action("set_brightness", "80")["ok"] is True
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        if index == 0:
+            done.set()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not any(thread.is_alive() for thread in threads), "deadlock: threads hung"
+    assert not errors
+    assert backend.calls  # lock never dropped: every call recorded + asserted
+    assert not ctrl._io_lock.locked()  # lock fully released afterwards
+
+
+def test_lock_is_nonreentrant_contract(controller) -> None:
+    # The FakeBackend._note assertion above would fail loudly if the
+    # controller ever nested the lock (self-deadlock on acquire); sanity-check
+    # the contract directly: a plain second acquire from this thread blocks.
+    ctrl, _ = controller
+    assert ctrl._io_lock.acquire()
+    try:
+        acquired = ctrl._io_lock.acquire(blocking=False)
+        assert acquired is False, "controller IO lock became reentrant"
+    finally:
+        ctrl._io_lock.release()
