@@ -779,9 +779,17 @@ const km = {
   editorStaged: document.getElementById("keymap-editor-staged"),
   writeButton: document.getElementById("keymap-write"),
   resetAll: document.getElementById("keymap-reset-all"),
+  // G18 commit 3: profile export/import toolbar (local store only).
+  exportButton: document.getElementById("keymap-export"),
+  importButton: document.getElementById("keymap-import"),
+  importFile: document.getElementById("keymap-import-file"),
 };
 
 const KEYMAP_BANNER_TEXT = km.banner ? km.banner.textContent.trim() : "";
+// G18 P4: fallback banner when the blank mirror is covered by the local
+// store's saved state (server sends the same sentence in payload.message).
+const KEYMAP_STORE_FALLBACK_TEXT =
+  "Device mirror is blank — showing your last saved configuration.";
 
 // --- G12: remap verification + self-healing revert (front end) --------------
 // Physics constraint: a remap's effect is observable ONLY through a physical
@@ -926,6 +934,11 @@ function applyKeystate(payload) {
     return;
   }
   if (km.banner) km.banner.textContent = KEYMAP_BANNER_TEXT;
+  if (data.source === "store") {
+    // G18 P4: the blank-mirror fallback is on screen — the banner must say
+    // "last saved configuration", never the factory-default sentence.
+    km.banner.textContent = payload.message || KEYMAP_STORE_FALLBACK_TEXT;
+  }
   toggleHidden(km.banner, !data.is_dirty_source);
   keymap.baseline = data.slots.map((slot) => slot.code);
   keymap.buffer = keymap.baseline.slice();
@@ -1258,6 +1271,91 @@ if (km.refresh) km.refresh.addEventListener("click", () => fetchKeystate());
 if (km.selfTest) km.selfTest.addEventListener("click", () => runMatrixSelfTest());
 if (km.writeButton) km.writeButton.addEventListener("click", () => writeKeymapBuffer());
 if (km.resetAll) km.resetAll.addEventListener("click", () => resetKeymapActiveProfile());
+
+// --- G18 commit 3: profile export / import (local store only) ---------------
+// Export downloads the STORED profile/layer as a JSON attachment — the
+// server reads the local store, never the device. Import POSTs the file for
+// server-side validation into the store; on success the codes are staged
+// into the editor buffer (dirty counter rises, Write button appears). The
+// device is touched ONLY by the existing gated Write path.
+async function exportActiveProfile() {
+  const data = keymapData();
+  const profile = data ? data.active_profile : 1;
+  const layer = data ? data.active_layer : 1;
+  try {
+    const response = await fetch(`/api/export?profile=${profile}&layer=${layer}`);
+    if (!response.ok) {
+      const err = await response.json().catch(() => null);
+      setText(els.statusMessage, (err && err.message) || "Export failed.");
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `open-glorious-core-p${profile}-l${layer}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setText(els.statusMessage, `Exported profile ${profile} layer ${layer} — check your downloads.`);
+  } catch (error) {
+    setText(els.statusMessage, `Export failed: ${error}`);
+  }
+}
+
+async function importProfileFile(file) {
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (error) {
+    setText(els.statusMessage, "Import failed: file is not valid JSON.");
+    return;
+  }
+  try {
+    const response = await fetch("/api/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await response.json();
+    if (!result.ok) {
+      // Invalid file: error toast, NOTHING staged (server staged nothing).
+      setText(els.statusMessage, result.message || "Import rejected.");
+      return;
+    }
+    const data = keymapData();
+    const targetsActive = data
+      && Number(result.profile) === Number(data.active_profile)
+      && Number(result.layer) === Number(data.active_layer);
+    if (targetsActive && keymap.buffer) {
+      for (const [slotKey, code] of Object.entries(result.keymap || {})) {
+        const slot = Number(slotKey);
+        if (Number.isInteger(slot) && slot >= 0 && slot < KEYMAP_SLOT_COUNT) {
+          keymap.buffer[slot] = Number(code);
+        }
+      }
+    }
+    setText(els.statusMessage, result.message);
+    renderKeymapMeta();
+    renderKeymapGrid();
+    renderKeymapEditor();
+  } catch (error) {
+    setText(els.statusMessage, `Import failed: ${error}`);
+  }
+}
+
+if (km.exportButton) {
+  km.exportButton.addEventListener("click", () => exportActiveProfile());
+}
+if (km.importButton && km.importFile) {
+  km.importButton.addEventListener("click", () => km.importFile.click());
+  km.importFile.addEventListener("change", () => {
+    const file = km.importFile.files && km.importFile.files[0];
+    km.importFile.value = "";
+    if (file) importProfileFile(file);
+  });
+}
 if (km.revertKey) {
   km.revertKey.addEventListener("click", () => {
     const meta = keymap.selectedSlot == null ? null : keymapSlotMeta(keymap.selectedSlot);

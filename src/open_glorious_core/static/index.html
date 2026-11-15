@@ -179,6 +179,16 @@
                             <button id="keymap-self-test" class="button button-secondary"
                                 title="Read-only scan of the keymap mirror against the board map (remap/KEYMAP_MAP.md). Never writes; runs only when clicked.">Run
                                 matrix self-test</button>
+                            <!-- G18 commit 3: profile export/import (local store only —
+                                 import stages, the device is written ONLY by Write). -->
+                            <button id="keymap-export" class="button button-secondary"
+                                title="Download the saved profile/layer as a JSON file (from the local store; never reads the device).">Export
+                                profile</button>
+                            <button id="keymap-import" class="button button-secondary"
+                                title="Load an exported profile JSON as staged changes — nothing is written to the keyboard until you press Write.">Import
+                                profile</button>
+                            <input id="keymap-import-file" type="file" accept="application/json,.json"
+                                class="is-hidden" aria-hidden="true" tabindex="-1">
                         </div>
                     </div>
                     <p id="keymap-banner" class="keymap-banner is-hidden">Device buffer not initialized — showing

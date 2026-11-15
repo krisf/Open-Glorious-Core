@@ -8,6 +8,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QIcon
@@ -15,6 +16,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication
 
 from . import lastgood
+from . import store
 from .backend import (
     KEYMAP_SLOTS,
     KEYMAP_SLOT_LABELS,
@@ -127,6 +129,28 @@ KEYMAP_BLANK_MIRROR_MESSAGE = (
     "Config mirror is blank (shadow buffer never populates on this wireless "
     "board post-factory-reset); showing packaged factory defaults. Writes "
     "still land and physical key test is the only verification."
+)
+# G18 P4 (commit 3): when the GET mirror is blank AND the local store has a
+# saved state for this device/profile/layer, the panel shows the STORED
+# state with this exact honest banner instead of the factory defaults.
+KEYMAP_STORE_FALLBACK_BANNER = (
+    "Device mirror is blank — showing your last saved configuration."
+)
+# Settings actions whose SUCCESS persists a settings snapshot to the local
+# store (G18 commit 3, "save after every successful settings write").
+SETTINGS_PERSIST_ACTIONS = frozenset(
+    {
+        "set_brightness",
+        "set_effect",
+        "set_speed",
+        "set_hue",
+        "set_saturation",
+        "set_color",
+        "set_custom_color",
+        "set_polling_rate",
+        "set_input_latency",
+        "set_side_lights",
+    }
 )
 # G16 (plan item 3): after EVERY successful apply-keymap/reset-keymap the
 # drawer banner states which profile/layer was written and how the operator
@@ -846,15 +870,32 @@ class OpenGloriousCoreWebController:
 
         codes = [int(entry.scancode) for entry in entries]
         is_dirty_source = shadow_blank_mirror or all(code == 0x00 for code in codes)
-        if shadow_blank_mirror:
+        # G18 P4: a blank mirror no longer blindly means "show factory
+        # defaults". When the local store holds a saved keymap for this
+        # exact (device, profile, layer), the honest display is the LAST
+        # SAVED configuration — shown with its own banner. Without stored
+        # data, today's factory-default display is unchanged.
+        stored_block: dict[str, Any] | None = None
+        if is_dirty_source:
+            candidate = self._stored_layer(profile, layer)
+            if candidate is not None and candidate.get("keymap"):
+                stored_block = candidate
+        if stored_block is not None:
+            source = "store"
+            stored_map = stored_block["keymap"]
+            # Partial stored maps merge over the factory table.
+            codes = [
+                int(stored_map.get(str(slot), int(factory[slot])))
+                for slot in range(KEYMAP_SLOTS)
+            ]
+        elif shadow_blank_mirror:
             source = "factory-defaults"
         elif is_dirty_source:
             source = "factory-default"
-        else:
-            source = "device"
-        if is_dirty_source and not shadow_blank_mirror:
             # Blank shadow buffer: display the packaged factory defaults.
             codes = [int(byte) for byte in factory]
+        else:
+            source = "device"
 
         types = self._default_types()
         # G17 (retracts G12 item 6): NO display overlay. The G13 cell sweep
@@ -919,7 +960,9 @@ class OpenGloriousCoreWebController:
         ]
 
         message = f"Keymap mirror read for profile {profile} layer {layer}."
-        if shadow_blank_mirror:
+        if stored_block is not None:
+            message = KEYMAP_STORE_FALLBACK_BANNER
+        elif shadow_blank_mirror:
             message = KEYMAP_BLANK_MIRROR_MESSAGE
         elif is_dirty_source:
             message = (
@@ -1015,6 +1058,218 @@ class OpenGloriousCoreWebController:
             if hasattr(self.backend, "close"):
                 self.backend.close()
 
+    # -- G18 commit 3: local store (P4 persistence, profile export/import) ---
+    #
+    # The WB5092 GET mirror is blank by quirk (P4): the board cannot tell us
+    # what it currently holds, so every value WE successfully wrote is
+    # persisted to store.py keyed by (device serial, profile, layer). The
+    # store NEVER touches the device — it is a local file only.
+
+    def _device_serial(self) -> str | None:
+        """Store key of the connected device (its USB physical serial)."""
+        devices = detect_gmmk_pro()
+        return devices[0].physical_id if devices else None
+
+    def _settings_snapshot(self) -> dict[str, Any]:
+        """Current backend settings, restricted to the store schema keys."""
+        backend_state = getattr(self.backend, "state", None)
+        snapshot: dict[str, Any] = {}
+        for attr, low, high in (
+            ("brightness", 0, 100),
+            ("speed", 0, 100),
+            ("effect", 0, 255),
+        ):
+            value = getattr(backend_state, attr, None)
+            if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+                snapshot[attr] = int(value)
+        color_name = getattr(self.backend, "color_name", None)
+        if isinstance(color_name, str) and 1 <= len(color_name) <= 40:
+            snapshot["color_name"] = color_name
+        for attr in ("polling_rate", "input_latency_ms"):
+            value = getattr(self.backend, attr, None)
+            if isinstance(value, int) and not isinstance(value, bool):
+                snapshot[attr] = int(value)
+        side_lights = getattr(self.backend, "side_lights", None)
+        if isinstance(side_lights, bool):
+            snapshot["side_lights"] = side_lights
+        return snapshot
+
+    def _store_record_settings(self) -> None:
+        """Persist the settings snapshot for the active profile/layer.
+        Never breaks the action path: a store failure is a logged note."""
+        serial = self._device_serial()
+        if not serial:
+            return
+        profile = int(getattr(self.backend, "profile", 1))
+        layer = int(getattr(self.backend, "layer", 1))
+        try:
+            store.record(serial, profile, layer, settings=self._settings_snapshot())
+        except (store.StoreError, OSError) as exc:
+            self._log_line(f"store settings write failed: {exc}")
+
+    def _store_record_keymap(self, profile: int, layer: int, codes: bytes) -> None:
+        """Persist an applied matrix for (profile, layer); log-only on error."""
+        serial = self._device_serial()
+        if not serial:
+            return
+        try:
+            store.record(serial, profile, layer, keymap=store.keymap_from_codes(codes))
+        except (store.StoreError, OSError) as exc:
+            self._log_line(f"store keymap write failed: {exc}")
+
+    def _stored_layer(self, profile: int, layer: int) -> dict[str, Any] | None:
+        """Stored block for the connected device's pair; None when absent."""
+        serial = self._device_serial()
+        if not serial:
+            return None
+        return store.get_layer(store.load(), serial, profile, layer)
+
+    def export_profile(self, profile: Any = None, layer: Any = None) -> dict[str, Any]:
+        """The stored profile/layer as an export document (local file only)."""
+        try:
+            profile_i = (
+                int(profile) if profile is not None
+                else int(getattr(self.backend, "profile", 1))
+            )
+            layer_i = (
+                int(layer) if layer is not None
+                else int(getattr(self.backend, "layer", 1))
+            )
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "profile and layer must be integers."}
+        if profile_i not in KEYMAP_PROFILES or layer_i not in KEYMAP_LAYERS:
+            return {"ok": False, "message": "profile and layer must be between 1 and 3."}
+        serial = self._device_serial()
+        if not serial:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        document = store.export_layer(serial, profile_i, layer_i)
+        if document is None:
+            return {
+                "ok": False,
+                "message": f"Nothing saved yet for profile {profile_i} layer {layer_i}.",
+            }
+        return {
+            "ok": True,
+            "filename": f"open-glorious-core-p{profile_i}-l{layer_i}.json",
+            "document": document,
+        }
+
+    def import_profile(self, payload: Any) -> dict[str, Any]:
+        """Validate an imported profile block into the STORE — staging only.
+
+        Import NEVER writes the device: the operator still presses Apply,
+        which runs the existing gated bind-first path. Accepted shapes: the
+        export document / bare block (``keymap`` and/or ``settings`` with
+        optional profile/layer) or a FULL store document (``devices``; this
+        device's entry, or its only entry, is taken).
+        """
+        if not isinstance(payload, dict):
+            return {"ok": False, "message": "Import payload must be a JSON object."}
+        serial = self._device_serial()
+        if not serial:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        active_profile = int(getattr(self.backend, "profile", 1))
+        active_layer = int(getattr(self.backend, "layer", 1))
+        wanted_profile = payload.get("profile")
+        wanted_layer = payload.get("layer")
+        keymap_in: Any = None
+        settings_in: Any = None
+        profile = active_profile
+        layer = active_layer
+        try:
+            if "keymap" in payload or "settings" in payload:
+                profile = int(wanted_profile if wanted_profile is not None else active_profile)
+                layer = int(wanted_layer if wanted_layer is not None else active_layer)
+                keymap_in = payload.get("keymap")
+                settings_in = payload.get("settings")
+                if keymap_in is None and settings_in is None:
+                    return {
+                        "ok": False,
+                        "message": "Import rejected: block carries neither keymap nor settings.",
+                    }
+            elif isinstance(payload.get("devices"), dict):
+                document = store._validated_document(payload)
+                devices = document["devices"]
+                if serial in devices:
+                    source_serial = serial
+                elif len(devices) == 1:
+                    source_serial = next(iter(devices))
+                else:
+                    return {
+                        "ok": False,
+                        "message": "Import document does not match the connected device.",
+                    }
+                if wanted_profile is not None and wanted_layer is not None:
+                    profile = int(wanted_profile)
+                    layer = int(wanted_layer)
+                    block = store.get_layer(document, source_serial, profile, layer)
+                    if block is None:
+                        return {
+                            "ok": False,
+                            "message": f"Import document has no profile {profile} layer {layer}.",
+                        }
+                else:
+                    pairs = sorted(
+                        (int(p), int(l))
+                        for p, prof in devices[source_serial]["profiles"].items()
+                        for l in prof["layers"]
+                    )
+                    if not pairs:
+                        return {"ok": False, "message": "Import document stores no layers."}
+                    profile, layer = pairs[0]
+                    block = store.get_layer(document, source_serial, profile, layer)
+                keymap_in = block.get("keymap")
+                settings_in = block.get("settings")
+                if keymap_in is None and settings_in is None:
+                    return {
+                        "ok": False,
+                        "message": f"Import document's profile {profile} layer {layer} is empty.",
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "message": "Import rejected: no keymap/settings block and no devices document.",
+                }
+            keymap_valid = store.validate_keymap(keymap_in) if keymap_in is not None else None
+            if keymap_valid is not None:
+                catalog = set(all_assignable_codes())
+                for slot_key, code in keymap_valid.items():
+                    if code not in catalog:
+                        return {
+                            "ok": False,
+                            "message": (
+                                f"Import rejected: code 0x{code:02X} at slot {slot_key} "
+                                "is not an assignable key."
+                            ),
+                        }
+            settings_valid = (
+                store.validate_settings(settings_in) if settings_in is not None else None
+            )
+            if keymap_valid is None and settings_valid is None:
+                return {"ok": False, "message": "Import rejected: nothing to import."}
+            block = store.record(serial, profile, layer, keymap=keymap_valid, settings=settings_valid)
+        except (store.StoreError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": f"Import rejected: {exc}"}
+        count = len(keymap_valid or {})
+        if keymap_valid:
+            message = (
+                f"Imported {count} key{'s' if count != 1 else ''} into profile {profile} "
+                f"layer {layer} — staged only, nothing written to the device."
+            )
+        else:
+            message = (
+                f"Imported settings into profile {profile} layer {layer} — saved "
+                "locally, nothing written to the device."
+            )
+        return {
+            "ok": True,
+            "message": message,
+            "profile": profile,
+            "layer": layer,
+            "keymap": dict(keymap_valid or {}),
+            "settings": dict(block.get("settings", {})),
+        }
+
     def run_action(self, action: str, value: Any = None) -> dict[str, Any]:
         bind_write_banner: str | None = None
         try:
@@ -1104,6 +1359,9 @@ class OpenGloriousCoreWebController:
                 # applied codes ride in `pending` and only become the
                 # revertable state on an operator-confirmed press (item 4).
                 self._record_last_good_apply(profile, layer, bytes(raw))
+                # G18 commit 3: the applied matrix is also the device's
+                # truth for the blank-mirror fallback — persist it.
+                self._store_record_keymap(profile, layer, bytes(raw))
                 bind_write_banner = KEYMAP_BIND_WRITE_BANNER.format(
                     profile=profile, layer=layer
                 )
@@ -1117,6 +1375,12 @@ class OpenGloriousCoreWebController:
                     profile,
                     layer,
                     lambda: self.backend.reset_keymap(profile, layer),
+                )
+                # The device now holds the factory table — the store must
+                # agree, or the blank-mirror fallback would resurrect old
+                # remaps after a factory reset.
+                self._store_record_keymap(
+                    profile, layer, self.backend.default_keymap_table()
                 )
                 bind_write_banner = KEYMAP_BIND_WRITE_BANNER.format(
                     profile=profile, layer=layer
@@ -1136,6 +1400,11 @@ class OpenGloriousCoreWebController:
                 return {"ok": False, "message": f"Unknown action: {action}"}
         except BackendError as exc:
             return {"ok": False, "message": str(exc)}
+
+        # G18 commit 3: every SUCCESSFUL settings write updates the local
+        # store for the active (device, profile, layer) triple.
+        if action in SETTINGS_PERSIST_ACTIONS:
+            self._store_record_settings()
 
         state = self.get_state()
         state["message"] = message
@@ -1160,12 +1429,15 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/keystate":
             self._send_json(self.controller.get_keystate())
             return
+        if urlparse(self.path).path == "/api/export":
+            self._send_export()
+            return
         if self.path == "/":
             self.path = "/index.html"
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent"):
+        if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent", "/api/import"):
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -1191,8 +1463,38 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
             return
 
+        if self.path == "/api/import":
+            # G18 commit 3: import validates + stages in the LOCAL store.
+            # It physically cannot write the device (no backend call).
+            result = self.controller.import_profile(payload)
+            self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
+            return
+
         result = self.controller.run_action(payload.get("action", ""), payload.get("value"))
         self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
+
+    def _send_export(self) -> None:
+        """G18 commit 3: /api/export — the stored profile/layer as a JSON
+        attachment (local store read only; never touches the device)."""
+        query = parse_qs(urlparse(self.path).query)
+        profile = query.get("profile", [None])[0]
+        layer = query.get("layer", [None])[0]
+        result = self.controller.export_profile(profile, layer)
+        if not result.get("ok"):
+            self._send_json(
+                {"ok": False, "message": result.get("message", "Export failed.")},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+        body = json.dumps(result["document"], indent=2, sort_keys=True).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{result["filename"]}"'
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format: str, *args) -> None:
         return

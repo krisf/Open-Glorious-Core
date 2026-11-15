@@ -55,8 +55,13 @@ def isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     ``lastgood.config_dir`` honours ``$OGC_CONFIG_DIR``, so no test can
     create/overwrite anything under the real ~/.config/open-glorious-core.
+
+    G18 commit 3 adds the same isolation for the local store: store.py
+    honours ``$XDG_DATA_HOME``, so no test can touch the real
+    ~/.local/share/open-glorious-core/store.json either.
     """
     monkeypatch.setenv("OGC_CONFIG_DIR", str(tmp_path / "ogc-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
 
 @pytest.fixture()
