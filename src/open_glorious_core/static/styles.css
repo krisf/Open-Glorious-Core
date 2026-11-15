@@ -151,6 +151,23 @@ output {
     overflow-wrap: normal;
 }
 
+/* G18-FIX1 D2: the backend-name subtitle ("stock-hidraw-glorious") is one
+   token — a single line with an ellipsis instead of breaking mid-token; the
+   title attribute carries the full string (native tooltip). */
+.device-card .device-card-subtitle {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* G18-FIX1 D2: let the card's text column shrink below its min-content so
+   the ellipsis above engages at the card width (grid items default to
+   min-width: auto, which would widen the card instead). No other change. */
+.device-card > div {
+    min-width: 0;
+}
+
 /* G18 F5: hidraw paths are developer detail — collapsed, one line per path,
    small monospace so "/dev/hidraw0" never breaks mid-token. */
 .device-details {
@@ -163,6 +180,8 @@ output {
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+    /* G18-FIX1 D2: the disclosure row never wraps ("DEVICE / DETAILS"). */
+    white-space: nowrap;
 }
 
 .device-details ul {

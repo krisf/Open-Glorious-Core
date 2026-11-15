@@ -172,6 +172,12 @@ const KEYCAP_SHORT_LABELS = {
   0x49: "Ins",
   0x4c: "Del",
   0x53: "NumLk",
+  // G18-FIX1 D1: vendor Fn (catalog name "Fn (vendor)") and the brackets —
+  // all three catalog names are too long for a cap face (0xa0 truncated on
+  // the BOTTOM line too, 0x2f/0x30 truncated the top one).
+  0xa0: "Fn",
+  0x2f: "[",
+  0x30: "]",
   0x52: "↑",
   0x51: "↓",
   0x50: "←",
@@ -182,6 +188,15 @@ const KEYCAP_SHORT_LABELS = {
 function keycapShortLabel(code) {
   const short = KEYCAP_SHORT_LABELS[Number(code)];
   return short === undefined ? null : short;
+}
+
+// G18-FIX1 D1: full face label for the TOP keycap line — the compact short
+// label wins when the code is mapped, else the physical name, else the
+// catalog name. (The G18 F2 fix only compacted the BOTTOM line, so the top
+// row rendered "Left …" three times over LCtrl/LGui/LAlt.) The renderer
+// keeps the FULL name on the tooltip.
+function keycapFaceLabel(code, physical, capName) {
+  return keycapShortLabel(code) || physical || capName || "";
 }
 // [PURE-HEX-END]
 
@@ -545,7 +560,7 @@ function renderDevices(backendName) {
       <img src="./assets/gmmkpro-selected.svg" alt="GMMK Pro icon">
       <div>
         <strong>${device.name}</strong>
-        <span>${backendName}</span>
+        <span class="device-card-subtitle" title="${backendName}">${backendName}</span>
         ${details}
       </div>
     `;
@@ -1031,11 +1046,13 @@ function renderKeymapGrid() {
       button.classList.toggle("is-dirty", dirty);
       button.classList.toggle("is-selected", keymap.selectedSlot === slot);
       button.dataset.slot = String(slot);
-      const label = (meta && meta.physical) || capName || "";
+      // G18-FIX1 D1: the face shows the compact label ("LCtrl"); the tooltip
+      // keeps the FULL name ("Left Ctrl") — G9 FIX B behaviour unchanged.
+      const fullName = (meta && meta.physical) || capName || "";
       const labelEl = document.createElement("span");
       labelEl.className = "keycap-label";
-      labelEl.textContent = label;
-      labelEl.title = label; // G9 FIX B: native tooltip with the full name
+      labelEl.textContent = keycapFaceLabel(code, meta && meta.physical, capName);
+      labelEl.title = fullName; // G9 FIX B: native tooltip with the full name
       const codeEl = document.createElement("span");
       codeEl.className = "keycap-code";
       // G18 F2: compact labels for dense caps (modifiers, cluster keys);
