@@ -144,10 +144,38 @@ output {
 .device-card span {
     color: var(--muted);
     font-size: 0.8rem;
-    /* G14 FIX 5: subtitle separators (hidraw path • backend) stay readable —
-       natural wrap inside the card, never clipped on one line. */
+    /* G18 F5 (supersedes G14 FIX 5): the card face shows only the backend
+       name now; with the hidraw paths moved to the collapsed details below,
+       nothing here needs mid-token breaking anymore. */
     white-space: normal;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+}
+
+/* G18 F5: hidraw paths are developer detail — collapsed, one line per path,
+   small monospace so "/dev/hidraw0" never breaks mid-token. */
+.device-details {
+    margin-top: 6px;
+}
+
+.device-details summary {
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.device-details ul {
+    margin: 6px 0 0;
+    padding-left: 16px;
+    list-style: none;
+}
+
+.device-details li {
+    font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    overflow-wrap: normal;
 }
 
 .ghost-rail-button,
@@ -248,7 +276,9 @@ output {
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.05);
     color: var(--muted);
-    font-size: 0.84rem;
+    font-size: 0.78rem;
+    /* G18 F5: chips wrap BETWEEN words, never mid-token. */
+    overflow-wrap: normal;
 }
 
 .keyboard-stage {
@@ -376,6 +406,14 @@ output {
     text-align: left;
     color: var(--text);
     cursor: pointer;
+}
+
+/* G18 F6: the preset chip matching the keyboard's current color gets an
+   accent ring; a custom color clears it on every chip (app.js state
+   render). */
+.color-chip.is-active {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 .color-chip span {
@@ -742,6 +780,27 @@ output {
     line-height: 1.5;
 }
 
+/* G18 F4: the developer matrix note is folded away by default — subtle,
+   muted, opens on demand. */
+.keymap-technical {
+    margin: 6px 0 0;
+}
+
+.keymap-technical summary {
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    opacity: 0.8;
+}
+
+.keymap-technical p {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.5;
+    opacity: 0.85;
+}
+
 .keymap-editor {
     display: flex;
     flex-direction: column;
@@ -749,7 +808,11 @@ output {
     padding: 18px;
     border: 1px solid var(--panel-border);
     border-radius: var(--radius-md);
-    background: var(--panel-2);
+    /* G18 F3: solid background — as an overlay on the grid, a translucent
+       panel let keycap text bleed through the drawer. No layout/position
+       change; the ≥960px overlay rules below are untouched. */
+    background: #242424;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
     align-self: start;
 }
 
@@ -918,6 +981,15 @@ output {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+}
+
+/* G18 F7: staged-code hint right above the commit buttons; hidden (is-hidden)
+   whenever the selected cap has no staged change. */
+.keymap-staged-hint {
+    margin: 0;
+    color: var(--accent);
+    font-size: 0.8rem;
+    line-height: 1.45;
 }
 
 .keymap-editor-actions .button,

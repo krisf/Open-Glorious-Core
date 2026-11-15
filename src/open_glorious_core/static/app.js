@@ -6,6 +6,9 @@ const state = {
   customColor: { red: 255, green: 255, blue: 255 },
   picker: { hue: 0, saturation: 0, value: 1 },
   activeColorGroup: null,
+  // G18 F6: preset name matching the keyboard's current RGB (null = custom
+  // color or unknown), so the preset chip row can ring the active color.
+  activeColorName: null,
 };
 
 const els = {
@@ -124,6 +127,54 @@ function keycapSlotIsUnassigned(meta, slotHasKeycap) {
   return Number(meta.factory_code) === 0xFF;
 }
 // [PURE-DRAWER-END]
+
+// [PURE-HEX-START]
+// Pure, DOM-free label logic (G18 F1/F2). Extracted verbatim between these
+// markers and unit-tested headlessly by tests/test_keymap_hex_js.py (node).
+// F1: hex labels are built from a NUMBER, never from String(code) —
+// `.toString(16)` on a STRING returns the string itself (no radix), so codes
+// above 0xFF (e.g. 0x104) rendered as garbage. padStart(2, "0") is only a
+// cosmetic floor: 0x104 legitimately stays "0x104".
+function keycodeHex(code) {
+  const num = Number(code);
+  if (!Number.isFinite(num) || num < 0) return "0x00";
+  return `0x${Math.trunc(num).toString(16).toUpperCase().padStart(2, "0")}`;
+}
+
+// F2: dense keycap faces need compact labels. Keyed by HID code; used ONLY
+// for the grid keycap text — tooltips, the remap editor and the search list
+// keep the full catalog name. Codes outside the map keep their catalog name.
+const KEYCAP_SHORT_LABELS = {
+  0xe0: "LCtrl",
+  0xe1: "LShft",
+  0xe2: "LAlt",
+  0xe3: "LGui",
+  0xe4: "RCtrl",
+  0xe5: "RShft",
+  0xe6: "RAlt",
+  0xe7: "RGui",
+  0x39: "Caps",
+  0x2a: "Bksp",
+  0x4b: "PgUp",
+  0x4e: "PgDn",
+  0x46: "PrSc",
+  0x47: "ScrL",
+  0x48: "Pause",
+  0x49: "Ins",
+  0x4c: "Del",
+  0x53: "NumLk",
+  0x52: "↑",
+  0x51: "↓",
+  0x50: "←",
+  0x4f: "→",
+};
+
+// Compact keycap label for a code, or null when the catalog name should stay.
+function keycapShortLabel(code) {
+  const short = KEYCAP_SHORT_LABELS[Number(code)];
+  return short === undefined ? null : short;
+}
+// [PURE-HEX-END]
 
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
@@ -441,6 +492,12 @@ function applyPayload(payload) {
     if (payload.state.red != null && payload.state.green != null && payload.state.blue != null) {
       syncCustomColorInputs(payload.state.red, payload.state.green, payload.state.blue);
     }
+    // G18 F6: recompute the active preset on EVERY state render.
+    state.activeColorName = colorNameForRgb(
+      payload.state.red, payload.state.green, payload.state.blue,
+    );
+  } else {
+    state.activeColorName = null;
   }
 
   renderDevices(payload.backend);
@@ -462,12 +519,20 @@ function renderDevices(backendName) {
     const card = document.createElement("div");
     card.className = "device-card";
     card.classList.toggle("is-active", index === 0);
-    const hidrawLabel = (device.hidraws || []).join(" • ");
+    // G18 F5: the raw hidraw paths are developer detail — collapsed out of
+    // the card's face, one structured line per path (no mid-token wrapping).
+    const hidrawItems = (device.hidraws || [])
+      .map((path) => `<li>${path}</li>`)
+      .join("");
+    const details = hidrawItems
+      ? `<details class="device-details"><summary>Device details</summary><ul>${hidrawItems}</ul></details>`
+      : "";
     card.innerHTML = `
       <img src="./assets/gmmkpro-selected.svg" alt="GMMK Pro icon">
       <div>
         <strong>${device.name}</strong>
-        <span>${hidrawLabel} • ${backendName}</span>
+        <span>${backendName}</span>
+        ${details}
       </div>
     `;
     els.deviceList.appendChild(card);
@@ -477,12 +542,34 @@ function renderDevices(backendName) {
 function renderDeviceMeta(device) {
   if (!els.deviceSummary) return;
   const items = [];
-  if (device?.hidraws?.length) items.push(`Interfaces: ${device.hidraws.join(", ")}`);
+  // G18 F5: hidraw paths moved into the card's collapsed "Device details";
+  // the summary chips keep the short, human-readable metadata only.
   if (device?.interfaces?.length) items.push(`USB functions: ${device.interfaces.join(", ")}`);
   if (device?.vendor_id && device?.product_id) items.push(`USB: ${device.vendor_id}:${device.product_id}`);
   if (state.colors.length) items.push(`${state.colors.length} color presets`);
   if (Object.keys(state.effects).length) items.push(`${Object.keys(state.effects).length} effects loaded`);
   setHtml(els.deviceSummary, items.map((item) => `<span class="meta-chip">${item}</span>`).join(""));
+}
+
+// G18 F6: mirror of the backend wire COLOR_MAP (backend.py) — the /api/state
+// payload carries the resolved RGB, and the preset whose map entry equals it
+// is the active color. A custom color equals no preset, so the ring clears.
+const COLOR_PRESET_RGB = {
+  red: [255, 0, 0],
+  yellow: [255, 255, 0],
+  green: [0, 255, 0],
+  cyan: [0, 255, 255],
+  blue: [0, 0, 255],
+  purple: [128, 0, 255],
+  white: [255, 255, 255],
+};
+
+function colorNameForRgb(red, green, blue) {
+  if (red == null || green == null || blue == null) return null;
+  for (const [name, rgb] of Object.entries(COLOR_PRESET_RGB)) {
+    if (rgb[0] === red && rgb[1] === green && rgb[2] === blue) return name;
+  }
+  return null; // custom color (or unknown) — no preset is active
 }
 
 function renderColors() {
@@ -506,6 +593,10 @@ function renderColors() {
   for (const color of state.colors) {
     const button = document.createElement("button");
     button.className = "color-chip";
+    // G18 F6: ring the chip matching the keyboard's current color; every
+    // ring is cleared while a custom color is active (activeColorName null).
+    button.classList.toggle("is-active", state.activeColorName === color);
+    button.setAttribute("aria-pressed", state.activeColorName === color ? "true" : "false");
     button.innerHTML = `<span class="color-preview" style="background:${previewMap[color] || "#ddd"}"></span><span>${color}</span>`;
     button.addEventListener("click", () => sendAction("set_color", color));
     els.colorGrid.appendChild(button);
@@ -625,6 +716,7 @@ const km = {
   codeList: document.getElementById("keymap-code-list"),
   revertKey: document.getElementById("keymap-revert-key"),
   unassignKey: document.getElementById("keymap-unassign-key"),
+  editorStaged: document.getElementById("keymap-editor-staged"),
   writeButton: document.getElementById("keymap-write"),
   resetAll: document.getElementById("keymap-reset-all"),
 };
@@ -716,7 +808,7 @@ function keymapCodes() {
 function keymapCodeName(code) {
   const entry = keymapCodes().find((item) => item.code === code);
   if (entry) return entry.name;
-  return `0x${String(code).toString(16).toUpperCase().padStart(2, "0")}`;
+  return keycodeHex(code); // G18 F1: numeric conversion, never String(code)
 }
 
 function keymapCodeShort(code) {
@@ -873,7 +965,9 @@ function renderKeymapGrid() {
       labelEl.title = label; // G9 FIX B: native tooltip with the full name
       const codeEl = document.createElement("span");
       codeEl.className = "keycap-code";
-      codeEl.textContent = keymapCodeShort(code);
+      // G18 F2: compact labels for dense caps (modifiers, cluster keys);
+      // everything else keeps the catalog name. Tooltip/editor untouched.
+      codeEl.textContent = keycapShortLabel(code) || keymapCodeShort(code);
       button.append(labelEl, codeEl);
       // G15: the tooltip shows the EFFECTIVE type the firmware honors
       // (payload type_name), and flags the cells whose type activates them.
@@ -933,7 +1027,7 @@ function renderKeymapCodeList() {
       nameEl.textContent = entry.name.replace(/ \(0x[0-9A-Fa-f]{2}\)$/, "");
       const hexEl = document.createElement("span");
       hexEl.className = "keymap-code-hex";
-      hexEl.textContent = `0x${String(entry.code).toString(16).toUpperCase().padStart(2, "0")}`;
+      hexEl.textContent = keycodeHex(entry.code); // G18 F1
       item.append(nameEl, hexEl);
       item.title = entry.aliases && entry.aliases.length
         ? `${entry.name} — search: ${entry.aliases.join(", ")}`
@@ -988,6 +1082,15 @@ function renderKeymapEditor() {
   renderKeymapCodeList();
   if (km.revertKey) km.revertKey.disabled = !meta;
   if (km.unassignKey) km.unassignKey.disabled = false;
+  // G18 F7: while THIS cap has a staged (dirty) code, name it right above
+  // the commit row so the operator sees what Apply will write. Hidden when
+  // nothing is staged — it reuses the existing buffer-vs-baseline state.
+  const staged = Boolean(keymap.baseline) && keymap.buffer[slot] !== keymap.baseline[slot];
+  if (staged) {
+    setText(km.editorStaged,
+      `Staged: ${keymapCodeName(keymap.buffer[slot])} — press Apply to write it to the keyboard.`);
+  }
+  toggleHidden(km.editorStaged, !staged);
 }
 
 // G10 FIX 5: matrix self-test aid — DEFAULT OFF. Runs ONLY on this button

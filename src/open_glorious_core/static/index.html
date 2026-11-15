@@ -17,7 +17,6 @@
                     <img src="./assets/glorious-logomark.svg" alt="Glorious logo">
                 </div>
                 <div>
-                    <p class="rail-kicker">Connected</p>
                     <h1 class="rail-title">Devices</h1>
                 </div>
             </div>
@@ -154,14 +153,22 @@
                     <div class="keymap-body">
                         <div class="keymap-grid-wrap">
                             <div id="keymap-grid" class="keymap-grid"></div>
-                            <p class="keymap-legend">Slots 14, 72, 92 (firmware matrix artifacts), slots 55&#8211;59
-                                (the row-4 head cells: factory-0xFF spares with no keycap; G17 retracts the G11 claim
-                                that 58 was Caps Lock) and the five row-6
-                                spacer positions 103, 104, 106, 107, 111 carry no physical keycap on this board
-                                (remap/KEYMAP_MAP.md incl. its SWEEP-VERDICT note) and render as invisible gaps,
-                                not keycaps. Each cap&#8217;s slot is a table cell from the map&#8217;s row tables
-                                (keymap-slots.js) &#8212; the row-4 block starts at slot 60, the Caps Lock cell the
-                                G13 sweep confirmed, all remaining block-trailing spares are not shown.</p>
+                            <!-- G18 F4: user-facing legend; the original developer
+                                 matrix note moved verbatim into a collapsed
+                                 technical block below. -->
+                            <p class="keymap-legend">Remaps are staged locally — Apply writes them to the keyboard's
+                                active layer.</p>
+                            <details class="keymap-technical">
+                                <summary>Technical notes</summary>
+                                <p>Slots 14, 72, 92 (firmware matrix artifacts), slots 55&#8211;59
+                                    (the row-4 head cells: factory-0xFF spares with no keycap; G17 retracts the G11 claim
+                                    that 58 was Caps Lock) and the five row-6
+                                    spacer positions 103, 104, 106, 107, 111 carry no physical keycap on this board
+                                    (remap/KEYMAP_MAP.md incl. its SWEEP-VERDICT note) and render as invisible gaps,
+                                    not keycaps. Each cap&#8217;s slot is a table cell from the map&#8217;s row tables
+                                    (keymap-slots.js) &#8212; the row-4 block starts at slot 60, the Caps Lock cell the
+                                    G13 sweep confirmed, all remaining block-trailing spares are not shown.</p>
+                            </details>
                         </div>
                         <aside id="keymap-editor" class="keymap-editor is-hidden">
                             <div class="keymap-editor-head">
@@ -197,6 +204,9 @@
                                         key</button>
                                     <button id="keymap-unassign-key" class="button button-secondary">Unassign</button>
                                 </div>
+                                <!-- G18 F7: names the staged code of THIS cap
+                                     right above Apply; hidden when clean. -->
+                                <p id="keymap-editor-staged" class="keymap-staged-hint is-hidden" role="status"></p>
                                 <div class="keymap-editor-commit">
                                     <button id="keymap-write" class="button is-hidden" disabled>Write keys to
                                         keyboard</button>
