@@ -174,6 +174,10 @@ def test_short_labels_only_rename_no_catalog_key() -> None:
         (0xA0, "Fn", "Fn (vendor)", "Fn"),
         (0x2F, "Left Bracket", "Left Bracket", "["),
         (0x30, "Right Bracket", "Right Bracket", "]"),
+        # G18-FIX2: the last two truncated faces (9-char catalog names whose
+        # bottom line already shows the glyph).
+        (0x31, "Backslash", "Backslash", "\\"),
+        (0x33, "Semicolon", "Semicolon", ";"),
         # No short entry -> the physical name wins.
         (0x04, "A", "A", "A"),
         # Nothing anywhere -> empty face, never "undefined".
@@ -196,7 +200,7 @@ def test_keycap_short_labels_cover_long_catalog_names() -> None:
     # 8 characters, so each MUST map to a compact short label (<= 5 chars).
     long_name_codes = [
         0x39, 0x2A, 0x4B, 0x4E, 0x46, 0x47, 0x48,
-        0x49, 0x4C, 0x53, 0xA0, 0x2F, 0x30,
+        0x49, 0x4C, 0x53, 0xA0, 0x2F, 0x30, 0x31, 0x33,
     ]
     for code in long_name_codes:
         label = _eval(f"KEYCAP_SHORT_LABELS[{code}]")

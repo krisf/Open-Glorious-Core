@@ -178,6 +178,10 @@ const KEYCAP_SHORT_LABELS = {
   0xa0: "Fn",
   0x2f: "[",
   0x30: "]",
+  // G18-FIX2: the two remaining truncated faces — 9-char catalog names whose
+  // bottom line already shows the glyph, so the top line gets it too.
+  0x31: "\\",
+  0x33: ";",
   0x52: "↑",
   0x51: "↓",
   0x50: "←",
