@@ -32,7 +32,22 @@ class KeyboardState:
 # own TypeScript (remap/PROTOCOL_DECODE.md; transport = FEATURE report ID 7).
 CMD_CHANGE_PROFILE = 0x01  # 4 selector bytes ONLY (ChangeProfileID)
 CMD_KEY_MATRIX = 0x03  # the keymap WRITE (SendButtonMatrix2Device)
+CMD_SET_POLLING = 0x08  # SetPollingRatetoDevice (G18 P1, PROTOCOL_DECODE.md line 34)
 CMD_GET_CONFIG = 0x81  # 129: config-mirror read (our proven read path)
+
+# G18 P1 polling-rate wire map (vendor SetPollingRatetoDevice): a STANDALONE
+# 264-byte buffer (Buffer.alloc(264)) — not the 256-byte properties framing.
+# Data[0]=0x07 report ID, Data[1]=0x08 command, Data[8]=index into the rate
+# tuple below, Data[9]=EP2Enable (vendor always 1), Data[10]=LEDNoChange (1 on
+# a standalone send). Data[11] exists only on V3 boards and is NEVER written
+# on WB5092.
+POLLING_RATES = (1000, 500, 250, 125)
+POLLING_REPORT_LENGTH = 264
+
+# G18 P2: properties byte [10] carries the RAW input-latency milliseconds;
+# the vendor UI offers exactly 2/8/16 ms. Byte [7] is the side-light switch
+# INVERTED (lights ON -> 0, OFF -> 1).
+INPUT_LATENCY_MS = (2, 8, 16)
 
 # Keymap table location inside the 256-byte config mirror exposed by a GET of
 # feature report 7 (remap/DISCOVERY.md "OPERATOR RUN"): 120 slots, one USB HID
@@ -206,6 +221,15 @@ class BaseBackend:
     def set_rgb_color(self, red: int, green: int, blue: int, save: bool, group: str | None = None) -> str:
         raise NotImplementedError
 
+    def set_polling_rate(self, value: int, save: bool) -> str:
+        raise NotImplementedError
+
+    def set_input_latency(self, value: int, save: bool) -> str:
+        raise NotImplementedError
+
+    def set_side_lights(self, value: bool, save: bool) -> str:
+        raise NotImplementedError
+
     def device_indication(self) -> str:
         raise NotImplementedError
 
@@ -260,6 +284,15 @@ class QmkHidBackend(BaseBackend):
 
     def set_rgb_color(self, red: int, green: int, blue: int, save: bool, group: str | None = None) -> str:
         raise BackendError("Custom RGB values are not mapped for the qmk_hid fallback yet.")
+
+    def set_polling_rate(self, value: int, save: bool) -> str:
+        raise BackendError("Polling rate control is not mapped for the qmk_hid fallback yet.")
+
+    def set_input_latency(self, value: int, save: bool) -> str:
+        raise BackendError("Input latency control is not mapped for the qmk_hid fallback yet.")
+
+    def set_side_lights(self, value: bool, save: bool) -> str:
+        raise BackendError("Side light control is not mapped for the qmk_hid fallback yet.")
 
     def device_indication(self) -> str:
         return self._run_via("--device-indication")
@@ -354,6 +387,13 @@ class StockGmmkProBackend(BaseBackend):
         self.state = KeyboardState(brightness=100, effect=7, speed=50, red=255, green=255, blue=255)
         self.color_name = "white"
         self.color_rgb = (255, 255, 255)
+        # G18 settings parity. These defaults keep the wire behavior
+        # BYTE-IDENTICAL to pre-G18 (P3): 1000 Hz is cmd-0x08 index 0, side
+        # lights ON maps to properties [7]=0 (inverted), and 16 ms is the
+        # value [10] was hardcoded to.
+        self.polling_rate = 1000
+        self.input_latency_ms = 16
+        self.side_lights = True
         self.profile = 1
         self.layer = 1
         if self.hidraw is not None:
@@ -430,6 +470,62 @@ class StockGmmkProBackend(BaseBackend):
             self.state.effect = self.SOLID_EFFECT
         self._apply_current_state()
         return f"Applied custom RGB color #{self.color_rgb[0]:02X}{self.color_rgb[1]:02X}{self.color_rgb[2]:02X} on {self.hidraw.name}."
+
+    def set_polling_rate(self, value: int, save: bool) -> str:
+        """SetPollingRatetoDevice (cmd 0x08, G18 P1) — standalone 264-byte report.
+
+        The vendor sends this as its own command (never part of the
+        properties/effective/profile trio), so the buffer goes straight
+        through the feature-report path exactly like the cmd-0x01 bind:
+        [0]=0x07, [1]=0x08, [8]=rate index into POLLING_RATES,
+        [9]=EP2Enable (always 1), [10]=LEDNoChange (1: keep current LEDs),
+        everything else zero. Byte [11] is V3-boards-only and is NEVER
+        written on WB5092. State updates only after the write succeeds.
+        """
+        if isinstance(value, bool):
+            raise BackendError(f"Polling rate must be one of {POLLING_RATES}, got {value!r}.")
+        try:
+            rate = int(value)
+        except (TypeError, ValueError) as exc:
+            raise BackendError(f"Polling rate must be one of {POLLING_RATES}, got {value!r}.") from exc
+        if rate not in POLLING_RATES:
+            raise BackendError(f"Polling rate must be one of {POLLING_RATES}, got {rate}.")
+        if not self.hidraw:
+            raise BackendError(self.install_hint())
+        report = bytearray(POLLING_REPORT_LENGTH)
+        report[0] = self.REPORT_ID
+        report[1] = CMD_SET_POLLING
+        report[8] = POLLING_RATES.index(rate)
+        report[9] = 1  # EP2Enable: the vendor always sends 1
+        report[10] = 1  # LEDNoChange: standalone change leaves the LEDs alone
+        self._send_feature_report(report)
+        self.polling_rate = rate
+        return f"Applied USB polling rate {rate} Hz on {self.hidraw.name}."
+
+    def set_input_latency(self, value: int, save: bool) -> str:
+        """Debounce window in ms — properties byte [10] carries the RAW value (P2)."""
+        if isinstance(value, bool):
+            raise BackendError(f"Input latency must be one of {INPUT_LATENCY_MS} ms, got {value!r}.")
+        try:
+            latency = int(value)
+        except (TypeError, ValueError) as exc:
+            raise BackendError(f"Input latency must be one of {INPUT_LATENCY_MS} ms, got {value!r}.") from exc
+        if latency not in INPUT_LATENCY_MS:
+            raise BackendError(
+                f"Input latency must be one of {INPUT_LATENCY_MS} ms, got {latency}."
+            )
+        self.input_latency_ms = latency
+        self._apply_current_state()
+        return f"Applied input latency {latency} ms on {self.hidraw.name}."
+
+    def set_side_lights(self, value: bool, save: bool) -> str:
+        """Side light bar on/off — properties byte [7] is INVERTED (P2): ON→0, OFF→1."""
+        if not isinstance(value, bool):
+            raise BackendError(f"Side lights switch must be true or false, got {value!r}.")
+        self.side_lights = value
+        self._apply_current_state()
+        state = "on" if value else "off"
+        return f"Side lights turned {state} on {self.hidraw.name}."
 
     def device_indication(self) -> str:
         raise BackendError("Device indication is not mapped yet for stock firmware.")
@@ -838,11 +934,15 @@ class StockGmmkProBackend(BaseBackend):
         report[2] = self.profile
         report[3] = self.layer
         report[4] = self.state.effect
-        report[5] = 0
-        report[6] = 1
-        report[7] = 0
+        report[5] = 0  # Win_Lock: the vendor always writes 0 (no win-lock UI in G18)
+        report[6] = 1  # PerKey_sw
+        # G18 P2 INVERTED switch: side lights ON -> 0, OFF -> 1. Default ON
+        # keeps the pre-G18 byte value 0 (P3 byte-identical behavior).
+        report[7] = 0 if self.side_lights else 1
         report[8] = round(self.state.brightness * 20 / 100)
-        report[10] = 16
+        # G18 P2: RAW input-latency ms (2/8/16). Default 16 is the value this
+        # byte was hardcoded to before G18 (P3).
+        report[10] = self.input_latency_ms
 
     def _prepare_effect_buffer(self, report: bytearray) -> None:
         red, green, blue = self.color_rgb

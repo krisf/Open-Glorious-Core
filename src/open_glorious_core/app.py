@@ -763,6 +763,11 @@ class OpenGloriousCoreWebController:
                 "red": state.red,
                 "green": state.green,
                 "blue": state.blue,
+                # G18 settings parity: the Performance panel renders from
+                # these (None on backends that do not track them).
+                "polling_rate": getattr(self.backend, "polling_rate", None),
+                "input_latency_ms": getattr(self.backend, "input_latency_ms", None),
+                "side_lights": getattr(self.backend, "side_lights", None),
             },
             "effects": getattr(self.backend, "EFFECT_LABELS", {}),
             "effect_color_groups": getattr(self.backend, "EFFECT_COLOR_GROUPS", {}),
@@ -1041,6 +1046,12 @@ class OpenGloriousCoreWebController:
                     True,
                     str(value.get("group")) if value.get("group") is not None else None,
                 )
+            elif action == "set_polling_rate":
+                message = self._backend_io(self.backend.set_polling_rate, value, True)
+            elif action == "set_input_latency":
+                message = self._backend_io(self.backend.set_input_latency, value, True)
+            elif action == "set_side_lights":
+                message = self._backend_io(self.backend.set_side_lights, value, True)
             elif action == "save":
                 message = self._backend_io(self.backend.save)
             elif action == "device_indication":

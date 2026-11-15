@@ -9,6 +9,11 @@ const state = {
   // G18 F6: preset name matching the keyboard's current RGB (null = custom
   // color or unknown), so the preset chip row can ring the active color.
   activeColorName: null,
+  // G18 commit 2: Performance panel mirror of /api/state (null = the
+  // backend does not track this setting).
+  pollingRate: null,
+  inputLatencyMs: null,
+  sideLights: null,
 };
 
 const els = {
@@ -40,6 +45,10 @@ const els = {
   customColorRed: document.getElementById("custom-color-red"),
   customColorGreen: document.getElementById("custom-color-green"),
   customColorBlue: document.getElementById("custom-color-blue"),
+  // G18 commit 2: Performance panel controls.
+  pollingGroup: document.getElementById("polling-rate-group"),
+  latencyGroup: document.getElementById("input-latency-group"),
+  sideLightsToggle: document.getElementById("side-lights-toggle"),
 };
 
 function setText(el, value) {
@@ -496,6 +505,10 @@ function applyPayload(payload) {
     state.activeColorName = colorNameForRgb(
       payload.state.red, payload.state.green, payload.state.blue,
     );
+    // G18 commit 2: Performance panel mirror follows the payload.
+    if (payload.state.polling_rate != null) state.pollingRate = payload.state.polling_rate;
+    if (payload.state.input_latency_ms != null) state.inputLatencyMs = payload.state.input_latency_ms;
+    if (payload.state.side_lights != null) state.sideLights = Boolean(payload.state.side_lights);
   } else {
     state.activeColorName = null;
   }
@@ -504,6 +517,7 @@ function applyPayload(payload) {
   renderDeviceMeta(selectedDevice);
   renderColors();
   renderEffects(activeEffect);
+  renderPerformance();
   updateColorControls(activeEffect);
 }
 
@@ -603,6 +617,23 @@ function renderColors() {
   }
 }
 
+// G18 commit 2: the Performance panel renders from the /api/state mirror on
+// every state update — segmented buttons ring the active value, the side
+// lights toggle follows the stored boolean.
+function renderPerformance() {
+  const markSegmented = (group, datasetKey, value) => {
+    if (!group) return;
+    for (const btn of group.querySelectorAll(".segment")) {
+      btn.classList.toggle("is-active", btn.dataset[datasetKey] === String(value));
+    }
+  };
+  markSegmented(els.pollingGroup, "rate", state.pollingRate);
+  markSegmented(els.latencyGroup, "latency", state.inputLatencyMs);
+  if (els.sideLightsToggle && state.sideLights != null) {
+    els.sideLightsToggle.checked = state.sideLights;
+  }
+}
+
 function renderEffects(activeEffect) {
   if (!els.effectGrid) return;
   const entries = Object.entries(state.effects || {});
@@ -628,6 +659,35 @@ if (els.refreshButton) {
 }
 if (els.flashButton) {
   els.flashButton.addEventListener("click", () => sendAction("device_indication"));
+}
+
+// G18 commit 2: Performance panel actions. Each click marks the segmented
+// group optimistically; the action response re-renders the whole panel from
+// the backend's authoritative state (a rejected value reverts the ring).
+if (els.pollingGroup) {
+  els.pollingGroup.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-rate]");
+    if (!btn) return;
+    for (const other of els.pollingGroup.querySelectorAll(".segment")) {
+      other.classList.toggle("is-active", other === btn);
+    }
+    sendAction("set_polling_rate", Number(btn.dataset.rate));
+  });
+}
+if (els.latencyGroup) {
+  els.latencyGroup.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-latency]");
+    if (!btn) return;
+    for (const other of els.latencyGroup.querySelectorAll(".segment")) {
+      other.classList.toggle("is-active", other === btn);
+    }
+    sendAction("set_input_latency", Number(btn.dataset.latency));
+  });
+}
+if (els.sideLightsToggle) {
+  els.sideLightsToggle.addEventListener("change", () => {
+    sendAction("set_side_lights", els.sideLightsToggle.checked);
+  });
 }
 
 // ---------------------------------------------------------------------------

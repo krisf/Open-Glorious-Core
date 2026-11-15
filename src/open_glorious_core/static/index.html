@@ -131,6 +131,42 @@
                     </div>
                 </section>
 
+                <!-- G18 commit 2: settings parity — polling rate, input
+                     latency, side lights (Performance panel, after colors). -->
+                <section id="performance-section" class="panel control-panel performance-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <p class="surface-kicker">Performance</p>
+                            <h3>Polling, Latency &amp; Side Lights</h3>
+                        </div>
+                    </div>
+                    <div class="performance-row">
+                        <span class="performance-label">USB polling rate</span>
+                        <div id="polling-rate-group" class="segmented" role="group" aria-label="USB polling rate">
+                            <button type="button" class="segment" data-rate="125">125 Hz</button>
+                            <button type="button" class="segment" data-rate="250">250 Hz</button>
+                            <button type="button" class="segment" data-rate="500">500 Hz</button>
+                            <button type="button" class="segment" data-rate="1000">1000 Hz</button>
+                        </div>
+                    </div>
+                    <div class="performance-row">
+                        <span class="performance-label">Input latency (debounce)</span>
+                        <div id="input-latency-group" class="segmented" role="group" aria-label="Input latency">
+                            <button type="button" class="segment" data-latency="2">2 ms</button>
+                            <button type="button" class="segment" data-latency="8">8 ms</button>
+                            <button type="button" class="segment" data-latency="16">16 ms</button>
+                        </div>
+                    </div>
+                    <div class="performance-row">
+                        <span class="performance-label">Side lights</span>
+                        <label class="toggle" for="side-lights-toggle">
+                            <input id="side-lights-toggle" type="checkbox">
+                            <span class="toggle-track" aria-hidden="true"></span>
+                            <span class="toggle-text">Light bar on</span>
+                        </label>
+                    </div>
+                </section>
+
                 <section id="keymap-panel" class="panel control-panel keymap-panel">
                     <div class="panel-heading keymap-head">
                         <div>
