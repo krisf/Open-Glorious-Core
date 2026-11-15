@@ -2,27 +2,33 @@
 
 Open Glorious Core is an open-source Linux desktop app for Glorious peripherals.
 
-Right now the project is focused on RGB control and has only been tested properly with the GMMK Pro, but the long-term goal is broader support for more Glorious keyboards, mice, and other peripherals.
+Right now the project is focused on the GMMK Pro (it is the only board tested
+properly so far), but the long-term goal is broader support for more Glorious
+keyboards, mice, and other peripherals.
 
 ## Current status
 
 What works today:
 
 - device detection on Linux through `hidraw`
-- stock-firmware RGB control for the GMMK Pro
-- solid colors
-- breathing
-- wave effects
-- brightness control
-- speed control
-- custom colors with picker, RGB, and hex input
+- stock-firmware RGB control for the GMMK Pro: all board effects, brightness,
+  speed, solid colors, custom colors with picker, RGB, and hex input
+- key remapping on the 120-slot matrix with profiles and layers; changes are
+  staged locally and only written to the board on an explicit Apply
+- performance settings: polling rate (1000/500/250/125 Hz), input latency
+  (2/8/16 ms), side lights on/off
+- local persistence of everything the app writes, plus profile export/import
+  (an import stages into the local store — it never writes the device)
 - native desktop window with an editable HTML/CSS/JS frontend
 
 What is planned later:
 
-- keybind and shortcut editing
+- macros and keybind functions (see the parity matrix below)
+- per-key RGB
 - broader Glorious device support
-- deeper effect mapping and firmware behavior cleanup
+
+See [Feature parity vs Windows Glorious CORE](#feature-parity-vs-windows-glorious-core)
+for the full feature-by-feature status and the protocol notes.
 
 ## Install
 
