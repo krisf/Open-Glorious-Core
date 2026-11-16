@@ -536,6 +536,61 @@ def test_mixed_matrix_untouched_vs_head(fake_hid, monkeypatch):
     assert (table[lo], table[lo + 1]) == (0x00, 0x01)
 
 
+def test_apply_all_three_repeat_modes_and_macro_id_order(fake_hid, monkeypatch):
+    # Commit-3 deepening of the "repeat modes map" bullet: ONE apply in which
+    # all three modes appear in the 0x04 table at their slot positions, and
+    # every stored macro ships as its own 0x05 in MACROID ORDER (not save
+    # order). Repeat 0 -> 00 01 = big-endian 0x0001; see MACRO_TYPE_WIRE_PAIRS
+    # (plan ground-truth section beats its stray "01 00" bullet — decided).
+    controller, _, fake = _controller(fake_hid, monkeypatch)
+    # Deliberate save order 1, 2, 0 -> the 0x05 stream must be 0, 1, 2.
+    assert controller.macro_save(
+        {"id": 1, "name": "off", "repeat": 0, "events": EVENTS3})["ok"]
+    assert controller.macro_save(
+        {"id": 2, "name": "hold", "repeat": 1, "events": EVENTS3})["ok"]
+    assert controller.macro_save(
+        {"id": 0, "name": "tog", "repeat": 2, "events": EVENTS3})["ok"]
+    assert controller.macro_assign({"slot": 20, "id": 1})["ok"]
+    assert controller.macro_assign({"slot": 40, "id": 2})["ok"]
+    assert controller.macro_assign({"slot": 60, "id": 0})["ok"]
+    codes = bytearray(FACTORY)
+    codes[10] = 0xE0  # Left Control: modifier cell, existing HEAD rules
+    codes[30] = 0x06  # Z: normal cell
+    fake.capture.clear()
+    assert _apply(controller, codes)["ok"]
+
+    cmds = [r[1] for r in fake.capture]
+    assert cmds == [0x01, 0x03, 0x04, 0x05, 0x05, 0x05, 0x01]
+
+    table = _cmd_reports(fake, CMD_MACRO_TYPE_TABLE)[-1]
+    assert (table[8 + 20 * 2], table[8 + 20 * 2 + 1]) == (0x00, 0x01)  # repeat 0
+    assert (table[8 + 40 * 2], table[8 + 40 * 2 + 1]) == (0xFF, 0xFF)  # repeat 1
+    assert (table[8 + 60 * 2], table[8 + 60 * 2 + 1]) == (0x00, 0x00)  # repeat 2
+    # Header [0..3] + the three FFs + the single 01 are the ONLY nonzero bytes
+    # => EVERY OTHER slot is 00 00, byte-exactly.
+    assert {i for i in range(MACRO_REPORT_LENGTH) if table[i]} == {0, 1, 2, 3, 49, 88, 89}
+
+    # Macro cells: type 0x05, code = MacroID; every other cell = HEAD rules.
+    matrix = fake.matrices[-1]
+    for slot, macro_id in ((20, 1), (40, 2), (60, 0)):
+        assert matrix[8 + slot] == 0x05
+        assert matrix[128 + slot] == macro_id
+    head_types = app_module.build_effective_types(bytes(codes), TYPES)
+    wire_types = app_module.build_macro_wire_codes(
+        bytes(codes), {"20": 1, "40": 2, "60": 0})
+    for slot in range(120):
+        if slot in (20, 40, 60):
+            continue
+        assert matrix[8 + slot] == head_types[slot], slot
+        assert matrix[128 + slot] == wire_types[slot] == codes[slot], slot
+
+    data = _cmd_reports(fake, CMD_MACRO_DATA)
+    assert [r[2] for r in data] == [0, 1, 2]  # MacroID order, one report each
+    for report in data:
+        assert bytes(report[8:17]) == PINNED_STREAM
+        assert all(not report[i] for i in range(17, MACRO_REPORT_LENGTH))
+
+
 # --- keystate + import/export -----------------------------------------------------
 
 def test_keystate_exposes_macro_cells(fake_hid, monkeypatch):

@@ -24,13 +24,19 @@ What works today:
 - Windows key lock toggle: shipped, pending the physical gate — it sets the
   properties-report win-lock byte on the next Apply, but firmware support
   on this board is still being verified against real hardware
+- macros: a Macro Editor panel plus a "Macros" category in the remap drawer —
+  up to 10 macros (M1..M10) of up to 82 steps each (key down/up with a per-step
+  delay, recorded or hand-built) and three repeat modes; macro keys show an
+  `M3`-style badge and are written as dedicated macro reports on Apply. The
+  board cannot report macros back, so macros live in your profile on this
+  computer — that store is the source of truth (same design as per-key colors)
 - local persistence of everything the app writes, plus profile export/import
   (an import stages into the local store — it never writes the device)
 - native desktop window with an editable HTML/CSS/JS frontend
 
 What is planned later:
 
-- macros and keybind functions (see the parity matrix below)
+- keybind functions (see the parity matrix below)
 - broader Glorious device support
 
 See [Feature parity vs Windows Glorious CORE](#feature-parity-vs-windows-glorious-core)
@@ -101,7 +107,8 @@ The frontend is kept simple on purpose. You can edit it directly here:
 | Side lights (on/off) | Implemented | Performance panel toggle; properties report byte [7] (inverted: ON = 0). |
 | Profile export / import | Implemented | `/api/export` downloads the stored profile/layer as JSON; `/api/import` validates and stages it — an import never writes the device, Apply still does. |
 | Local persistence | Implemented | Values we write are stored under `$XDG_DATA_HOME/open-glorious-core/store.json`; the blank device mirror is covered by this store (banner says so). |
-| Macros, keybind functions | Planned (G19) | Macro report preview below. |
+| Macros | Shipped (store = truth, no readback) | Macro Editor panel + "Macros" category in the remap drawer: 10 macros (`M1`..`M10`, MacroIDs 0..9), up to 82 steps each (key down/up + 1..65535 ms delay, recorded with real timings or added by hand), three repeat modes (No Repeat / Repeat While Holding / Toggle). Assigned keys become matrix type `0x05` with code = MacroID; Apply writes cmd `0x04` (per-slot repeat-mode table) + one `0x05` per stored macro (see Protocol notes). The board has no macro readback (the GET mirror is a blank shadow), so macros live in your profile on this computer and the store is the source of truth — the UI never claims to read macros off the keyboard. Physical macro playback is gated separately (footnote below); we make no device-verification claim. |
+| Keybind functions | Planned | Vendor keybind-function encoding beyond plain remaps and macros is not reverse-engineered yet. |
 | Windows key lock | Shipped, pending gate | Performance panel toggle; drives the properties report byte [5] (`0` = unlocked, `1` = locked) on the next Apply. The vendor always sends `0` on this board and there is no readback, so whether the firmware honors it is still pending verification on physical hardware. |
 | Per-key RGB | Shipped (local mirror) | "Per-key colors" in the Lighting panel: up to 120 slots with off/lit/breathing modes and its own brightness, written over three cmd `0x06` layout pages on every Apply. There is no color readback (the cmd `0x81` mirror is a blank shadow), so colors live in your profile on this computer — that store is the source of truth, and the UI never claims to read colors off the keyboard. |
 | Windows CORE knob assignment | Intentionally absent | Windows CORE knob assignment is a CORE-app software feature on this board (no device-protocol path on 5092 — verified against vendor sources); out of scope for the Linux app; knob keeps firmware default behavior. |
@@ -158,6 +165,33 @@ Side LEDs are ordinary slots in this layout (15–18, 35–38, 55–58, 75–78)
 special encoding. The PerKey switch byte (properties [6]) is always `1` on this
 board and stays untouched; the pages only ride when per-key mode is on.
 
-**Macro report preview (G19) — sub-command `0x05`**: 248-byte payload of
-`(type, keycode, delay)` triplets, mirroring the vendor's macro editor layout.
-Not implemented yet; documented here so the wire map stays in one place.
+**Macro type table — sub-command `0x04`** (264-byte buffer, only sent on Apply
+when at least one key carries a macro; payload from `[8]` is two bytes per slot,
+big-endian u16 at `[8 + slot * 2]`):
+
+| Byte | Meaning |
+| --- | --- |
+| [2] | Profile + 1 |
+| [3] | Layer + 1 |
+| [8 + slot*2 .. +1] | Repeat mode for that slot: No Repeat `0x0001`, Repeat While Holding `0xFFFF`, Toggle `0x0000`; slots without a macro are `0x0000` |
+
+**Macro data — sub-command `0x05`** (one 264-byte buffer per stored non-empty
+macro, sent on Apply in MacroID order; the 248-byte payload `[8..255]` holds up
+to 82 three-byte steps — a trailing zero ends the list):
+
+| Byte | Meaning |
+| --- | --- |
+| [2] | MacroID (0..9; shown as `M1`..`M10` in the UI) |
+| [8 + i*3] | `(delay >> 8)` with `0x80` set while the key goes DOWN |
+| [9 + i*3] | `delay & 0xFF` (big-endian milliseconds, 1..65535) |
+| [10 + i*3] | HID usage code of the key |
+
+A step emits its change **then** waits its delay. Macro keys are matrix cells
+of type `0x05` with code = MacroID in the `0x03` report; everything else about
+the matrix write is unchanged.
+
+Footnote (physical playback): these byte layouts are pinned to vendor captures
+and covered by device-free byte-exact tests, but playing a macro on a physical
+board is **not yet verified on hardware** — that gate is tracked separately
+(same status style as the Windows key lock row). Nothing here claims the
+keyboard was observed executing a macro.
