@@ -50,8 +50,12 @@ SEARCH_START = "// [PURE-SEARCH-START]"
 SEARCH_END = "// [PURE-SEARCH-END]"
 PINNED_NODE = "/home/ubuntu/.hermes/tools/node-26.7.0-linux-x64/bin/node"
 
+# G19B-FIX1 F1: the footer names the REAL control — the canonical
+# MACRO_WRITE_BUTTON_LABEL template ("Apply (top-right)" named nothing that
+# exists on this UI).
+WRITE_BUTTON_LABEL = "Write macros to keyboard"
 FOOTER_NOTE = (
-    "Macros live in your profile; click Apply (top-right) to write them to "
+    f"Macros live in your profile; click {WRITE_BUTTON_LABEL} to write them to "
     "the board."
 )
 
@@ -528,3 +532,229 @@ def test_styles_use_solid_backgrounds_for_macro_controls() -> None:
     assert "background: #c92f22;" in css  # recording state is solid red
     assert ".keycap-macro-badge" in css
     assert "pointer-events: none;" in css  # badge never steals cap clicks
+
+
+# ---------------------------------------------------------------------------
+# G19B-FIX1 — copy vs control (F1), snapshot semantics (F2), step-row
+# legibility (F3), selection marker (F4), pill interactivity (F5), list
+# padding (F6), per-key dead band (F7), name-field state (F8).
+# ---------------------------------------------------------------------------
+
+# F1: one canonical control name + two derived templates, no third variant.
+def test_write_button_label_constant_is_the_control_name() -> None:
+    assert _eval("MACRO_WRITE_BUTTON_LABEL") == WRITE_BUTTON_LABEL
+    assert _eval("MACRO_FOOTER_NOTE") == FOOTER_NOTE
+    assert _eval("MACRO_PENDING_NOTE") == f"macros waiting for {WRITE_BUTTON_LABEL}"
+
+
+def test_footer_and_chip_templates_name_the_real_control() -> None:
+    section = _macro_section()
+    # Both templates are DERIVED from the constant (single source), and the
+    # static footer names the control too.
+    assert "MACRO_WRITE_BUTTON_LABEL" in section
+    assert "`Macros live in your profile; click ${MACRO_WRITE_BUTTON_LABEL}" in section
+    assert "`macros waiting for ${MACRO_WRITE_BUTTON_LABEL}`" in section
+    html = _html()
+    assert "Write macros to keyboard" in html  # macro-apply button label
+    footer = re.search(r'<p class="macro-footer-note">(.*?)</p>', html, re.DOTALL)
+    # HTML collapses whitespace runs; compare against the collapsed text.
+    assert footer and " ".join(footer.group(1).split()).find(WRITE_BUTTON_LABEL) >= 0
+
+
+def test_no_stale_apply_copy_remains() -> None:
+    # The blocker: copy pointed at an "Apply" control that does not exist.
+    for text in (_js(), _html()):
+        assert "Apply (top-right)" not in text
+        assert "waiting for Apply" not in text
+    # No third variant: app.js spells the control name as a literal exactly
+    # once — in the constant itself; everything else references it.
+    assert _js().count(f'"{WRITE_BUTTON_LABEL}"') == 1
+
+
+# F2: canonical snapshot stringify — key-order-insensitive equal, content-
+# sensitive different (pure, headless).
+def test_canonical_stringify_sorts_object_keys() -> None:
+    # JSON.stringify / Object.keys keep INSERTION order for string keys;
+    # the canonical form must not depend on it.
+    assert _eval('canonicalMacroJson({z: 1, a: {y: 2, x: 3}})') == \
+        '{"a":{"x":3,"y":2},"z":1}'
+    # Arrays keep their order — step order IS data.
+    assert _eval("canonicalMacroJson([2, 1])") == "[2,1]"
+
+
+def test_canonical_snapshot_equal_regardless_of_key_order() -> None:
+    store_a = (
+        '{"0": {"name": "combo", "repeat": 0, "events": '
+        '[{"down": true, "code": 4, "delay": 50}]}}'
+    )
+    store_b = (
+        '{"0": {"events": [{"delay": 50, "code": 4, "down": true}], '
+        '"name": "combo", "repeat": 0}}'
+    )
+    assert _eval(
+        f"macroStoreSnapshot({store_a}, {{'20': 0}}) "
+        f"=== macroStoreSnapshot({store_b}, {{'20': 0}})"
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("macros_b", "slots_b", "why"),
+    [
+        ('{"0": {"name": "combo", "repeat": 0, "events": '
+         '[{"down": true, "code": 4, "delay": 51}]}}',
+         {"20": 0}, "delay changed (this is the F2 repro: delete/recreate "
+                    "changes CONTENT, a mere POST does not)"),
+        ("{}", {"20": 0}, "macro deleted"),
+        ('{"1": {"name": "x", "repeat": 0, "events": '
+         '[{"down": true, "code": 5, "delay": 9}]}}',
+         {"20": 1}, "macro replaced"),
+        ('{"0": {"name": "combo", "repeat": 2, "events": '
+         '[{"down": true, "code": 4, "delay": 50}]}}',
+         {"20": 0}, "repeat mode changed"),
+        ("{}", {}, "store emptied (net-zero delete must NOT read as equal "
+                   "to the pre-delete snapshot)"),
+    ],
+)
+def test_canonical_snapshot_sensitive_to_content(macros_b, slots_b, why) -> None:
+    macros_a = (
+        '{"0": {"name": "combo", "repeat": 0, "events": '
+        '[{"down": true, "code": 4, "delay": 50}]}}'
+    )
+    assert _eval(
+        f"macroStoreDiffers({macros_a}, {{'20': 0}}, "
+        f"macroStoreSnapshot({macros_b}, {json.dumps(slots_b)}))"
+    ) is True, why
+
+
+def test_snapshot_compare_never_claims_pending_without_snapshot() -> None:
+    # Store not loaded yet must never light the chip / reveal the button.
+    assert _eval("macroStoreDiffers({}, {}, null)") is False
+    assert _eval("macroStoreDiffers({'0': {}}, {}, undefined)") is False
+    # Equal store vs its own snapshot -> not pending (delete-the-only-macro
+    # re-saved identically scenario, and the steady state after a write).
+    assert _eval(
+        "macroStoreDiffers({'0': {name: 'a'}}, {'20': 0}, "
+        "macroStoreSnapshot({'0': {name: 'a'}}, {'20': 0}))"
+    ) is False
+
+
+# F2 (structure): the pending UI keys off the snapshot compare, not a flag.
+def test_pending_logic_references_snapshot_compare() -> None:
+    js = _js()
+    assert (
+        "function macroWritePending() {\n"
+        "  return macroStoreDiffers(state.macros, state.macroSlots, macro.snapshot);\n"
+        "}" in js
+    )
+    # The old flag is GONE — nothing can re-light the chip without a diff.
+    assert "macro.dirty" not in js
+    # Every pending consumer calls the compare.
+    for func in ("renderKeymapMeta", "renderMacroPanel"):
+        body = re.search(
+            rf"function {func}\(\) \{{.*?\n\}}", js, flags=re.DOTALL
+        )
+        assert body and "macroWritePending()" in body.group(0), func
+    guard = js[js.index("async function writeKeymapBuffer()"):]
+    guard = guard[: guard.index("\nasync function ")]
+    assert "!macroWritePending()" in guard  # the macros-only write path
+    # Snapshot captured ONCE at page load (first store arrival)...
+    load = js[js.index("function applyPayload("):]
+    load = load[: load.index("\nfunction ")]
+    assert "if (macro.snapshot === null)" in load
+    assert "macro.snapshot = macroStoreSnapshot(" in load
+    # ...and refreshed on EVERY successful board write (apply + reset).
+    writes = js[js.index("async function writeKeymapBuffer()"):
+                js.index("async function switchKeymapProfile(")]
+    assert writes.count("macro.snapshot = macroStoreSnapshot(") == 2
+
+
+# F3: ms suffix, aria-labels, enlarged remove control.
+def test_step_delay_ms_suffix_and_aria_labels() -> None:
+    assert _eval("MACRO_STEP_DELAY_UNIT") == "ms"
+    js = _js()
+    steps = js[js.index("function renderMacroSteps()"):]
+    steps = steps[: steps.index("\nfunction ")]
+    assert "MACRO_STEP_DELAY_UNIT" in steps  # suffix rendered from the constant
+    assert 'delay.setAttribute("aria-label", `Step ${i + 1} delay in milliseconds`)' in steps
+    assert 'remove.setAttribute("aria-label", `Remove step ${i + 1}`)' in steps
+    # The toolbar delay input carries an aria-label too (every delay input).
+    delay_tag = re.search(r"<input id=\"macro-step-delay\"[^>]*>", _html(), re.DOTALL)
+    assert delay_tag and 'aria-label="' in delay_tag.group(0)
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    unit = re.search(r"\.macro-step-delay-unit \{([^}]*)\}", css)
+    assert unit and "var(--muted)" in unit.group(1)
+
+
+def test_step_remove_control_is_a_real_target() -> None:
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    rule = re.search(r"\.macro-step-remove \{([^}]*)\}", css)
+    assert rule, ".macro-step-remove rule missing"
+    body = rule.group(1)
+    for size in re.findall(r"(?:width|height): (\d+)px;", body):
+        assert int(size) >= 24, f"hit target too small: {size}px"
+    assert "width: 26px" in body and "height: 26px" in body
+    assert "color: var(--text);" in body  # higher-contrast × (not muted)
+    hover = re.search(r"\.macro-step-remove:hover:not\(:disabled\) \{([^}]*)\}", css)
+    assert hover, "remove hover state missing"
+    assert "color:" in hover.group(1) and "background:" in hover.group(1)
+
+
+# F5: the pill toggles — handler registered, interactive styling, tooltip.
+def test_down_up_pill_toggles_step_down_flag() -> None:
+    js = _js()
+    steps = js[js.index("function renderMacroSteps()"):]
+    steps = steps[: steps.index("\nfunction ")]
+    handler = steps[steps.index('pill.addEventListener("click"'):]
+    handler = handler[: handler.index("});")]
+    assert "step.down = !step.down" in handler
+    assert "renderMacroSteps()" in handler
+    assert 'pill.title = "Toggle this step between key press and key release"' in steps
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    pill = re.search(r"\.macro-step-pill \{([^}]*)\}", css)
+    assert pill and "cursor: pointer;" in pill.group(1)
+    hover = re.search(r"\.macro-step-pill:hover:not\(:disabled\) \{([^}]*)\}", css)
+    assert hover and "box-shadow:" in hover.group(1)  # hover ring
+
+
+# F4/F6/F7/F8: the static pins on styles.css.
+def test_selected_m_row_dot_fills_like_repeat_cards() -> None:
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    rule = re.search(r"\.macro-row\.is-active \.macro-dot \{([^}]*)\}", css)
+    assert rule, "selected-row dot rule missing"
+    assert "background: var(--accent);" in rule.group(1)
+    assert "border-color: var(--accent);" in rule.group(1)
+    # Same accent-fill language the Repeat-card checked radio uses.
+    assert "accent-color: var(--accent);" in css
+
+
+def test_macro_list_has_bottom_padding_for_m10() -> None:
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    rule = re.search(r"\.macro-list \{([^}]*)\}", css)
+    assert rule and re.search(r"padding-bottom: (?:[6-9]|1\d)px;", rule.group(1)), \
+        "M10 needs >=6px of clearance below the list"
+
+
+def test_per_key_dead_band_carries_one_panel_padding() -> None:
+    # F7 (G19A-FIX1 D7 carry-over): the boundary is the existing 18px
+    # .control-stack gap + ONE section's 22px padding — this section opts
+    # its own top padding out (no new magic number; a structural pin).
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    rule = re.search(r"#color-controls-section \{([^}]*)\}", css)
+    assert rule and "padding-top: 0;" in rule.group(1)
+    # The shared rhythm itself must NOT have been retuned.
+    stack = re.search(r"\.control-stack \{([^}]*)\}", css)
+    assert stack and "gap: 18px;" in stack.group(1)
+    assert "padding: 22px;" in css
+
+
+def test_saved_name_is_value_empty_row_is_placeholder() -> None:
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    name = re.search(r"\.macro-row-name \{([^}]*)\}", css)
+    assert name and "color: var(--text);" in name.group(1)  # VALUE contrast
+    placeholder = re.search(r"\.macro-row-name::placeholder \{([^}]*)\}", css)
+    assert placeholder, "placeholder rule missing"
+    assert "color: var(--muted);" in placeholder.group(1)
+    assert "opacity: 1;" in placeholder.group(1)  # kill engine alpha guessing
+    disabled = re.search(r"\.macro-row-name:disabled \{([^}]*)\}", css)
+    assert disabled and "color: var(--muted);" in disabled.group(1)
+

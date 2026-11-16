@@ -571,6 +571,20 @@ output {
     padding-top: 0;
 }
 
+/* G19B-FIX1 F7 (D7 carry-over): D7 removed the INNER double-seating, but
+   the boundary still stacked THREE values — the lighting panel's 22px
+   bottom padding + the 18px stack gap + this panel's own 22px top padding
+   — a ~60-80px dead band between the per-key helper paragraph and the
+   CUSTOM COLOR head while every intra-card section break sits at ~32-40px.
+   One panel's padding per boundary is the rhythm (the .control-stack gap
+   plus ONE side's 22px carry it); this panel opts its own top padding out,
+   exactly like .custom-color-panel opted its inner top padding out in D7.
+   No new value: the boundary is carried by the existing 18px gap + the
+   previous section's existing 22px padding. */
+#color-controls-section {
+    padding-top: 0;
+}
+
 .custom-color-head {
     margin-bottom: 14px;
 }
@@ -1427,6 +1441,10 @@ output {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    /* G19B-FIX1 F6: the M1..M10 list used to sit flush on the column bottom
+       (the 10th row had nothing beneath it but the panel edge on short
+       viewports) — one column-gap unit of breathing room keeps M10 clear. */
+    padding-bottom: 8px;
 }
 
 /* Solid rows (no panel alpha) — the list is the densest surface here. */
@@ -1445,6 +1463,14 @@ output {
     border-color: var(--accent);
 }
 
+/* G19B-FIX1 F4: selection language is ONE convention — the Repeat cards'
+   checked radio is filled with the accent, so the selected M-row's dot is
+   filled too (a border alone read as "hover" next to a hollow dot). */
+.macro-row.is-active .macro-dot {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
 .macro-row-name {
     flex: 1 1 auto;
     min-width: 0;
@@ -1459,6 +1485,15 @@ output {
 .macro-row-name:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+/* G19B-FIX1 F8: a saved name is a VALUE — it renders at normal contrast
+   (color: var(--text) above, not disabled). The muted state belongs to the
+   EMPTY rows' placeholder only; engines' default placeholder alpha made
+   the two read alike, so the placeholder gets the muted token explicitly. */
+.macro-row-name::placeholder {
+    color: var(--muted);
+    opacity: 1;
 }
 
 .macro-row-name:disabled {
@@ -1617,8 +1652,31 @@ output {
     cursor: not-allowed;
 }
 
+/* G19B-FIX1 F5: the pill TOGGLES the step's down flag on click (see the
+   handler in renderMacroSteps) — the hover ring advertises that it is a
+   control, in the accent already used for focus rings elsewhere. */
+.macro-step-pill:hover:not(:disabled) {
+    box-shadow: 0 0 0 2px rgba(243, 154, 35, 0.35);
+}
+
+/* G19B-FIX1 F3: the per-row delay is [number] ms — the muted suffix makes
+   the bare number self-describing. */
+.macro-step-delay-cell {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+}
+
+.macro-step-delay-unit {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
 .macro-step-delay {
     width: 100%;
+    min-width: 0;
     padding: 4px 8px;
     border: 1px solid var(--panel-border);
     border-radius: 6px;
@@ -1633,19 +1691,28 @@ output {
     border-color: var(--accent);
 }
 
+/* G19B-FIX1 F3: the row remove control was a 12px-ish muted × — a hairline
+   nobody hit on purpose. Now a real 26px target (≥24px), the × at normal
+   text contrast, and the hover state names its destructive intent. */
 .macro-step-remove {
-    padding: 2px 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
     border: none;
     border-radius: 6px;
     background: transparent;
-    color: var(--muted);
-    font-size: 0.95rem;
+    color: var(--text);
+    font-size: 1.05rem;
     line-height: 1;
     cursor: pointer;
 }
 
 .macro-step-remove:hover:not(:disabled) {
     color: #ff7a6e;
+    background: rgba(255, 122, 110, 0.14);
 }
 
 .macro-step-count {

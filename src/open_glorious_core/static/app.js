@@ -535,6 +535,55 @@ function buildMacroSavePayload(id, name, repeat, steps) {
     })),
   };
 }
+
+// G19B-FIX1 F1: the ONLY name of the control that pushes macros to the
+// board. Every macro-facing string is built from this constant — the footer
+// note, the pending chip, the dirty-counter suffix, the drawer hints. There
+// is no control called "Apply" on this UI, so no copy may name one.
+const MACRO_WRITE_BUTTON_LABEL = "Write macros to keyboard";
+
+// F1: the two canonical macro-facing templates, derived from the label (no
+// third variant may exist anywhere else).
+const MACRO_FOOTER_NOTE =
+  `Macros live in your profile; click ${MACRO_WRITE_BUTTON_LABEL} to write them to the board.`;
+const MACRO_PENDING_NOTE = `macros waiting for ${MACRO_WRITE_BUTTON_LABEL}`;
+
+// G19B-FIX1 F3: the delay unit rendered as the muted per-row suffix.
+const MACRO_STEP_DELAY_UNIT = "ms";
+
+// G19B-FIX1 F2: "pending" means the STORE DIFFERS from what the last
+// successful write (or the page-load baseline) snapshotted — not "some POST
+// happened". canonicalMacroJson is a pure deterministic stringify with
+// SORTED object keys (arrays keep their order; step order is data), so key
+// order in a payload can never fake a diff and a content change can never
+// hide. An undefined member reads as null, matching JSON convention.
+function canonicalMacroJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalMacroJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${canonicalMacroJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return value === undefined ? "null" : JSON.stringify(value);
+}
+
+// Snapshot string of the whole macro store (macros + slot assignments).
+function macroStoreSnapshot(macros, macroSlots) {
+  return canonicalMacroJson({
+    macros: macros || {},
+    macro_slots: macroSlots || {},
+  });
+}
+
+// True when the current store differs from a snapshot string. A missing
+// snapshot (store never loaded) never claims pending.
+function macroStoreDiffers(macros, macroSlots, snapshot) {
+  if (typeof snapshot !== "string") return false;
+  return macroStoreSnapshot(macros, macroSlots) !== snapshot;
+}
 // [PURE-MACRO-END]
 
 function rgbToHex(red, green, blue) {
@@ -940,6 +989,13 @@ function applyPayload(payload) {
   if (payload.macros || payload.macro_slots) {
     state.macros = payload.macros || {};
     state.macroSlots = payload.macro_slots || {};
+    // G19B-FIX1 F2: the FIRST store arrival is the page-load baseline. The
+    // pending chip / write buttons show only what DIFFERS from this
+    // snapshot (refreshed on every successful board write), never a bare
+    // "a POST happened" flag.
+    if (macro.snapshot === null) {
+      macro.snapshot = macroStoreSnapshot(state.macros, state.macroSlots);
+    }
   }
   renderMacroPanel();
   renderKeymapGrid();
@@ -1605,18 +1661,20 @@ function renderKeymapMeta() {
     toggleHidden(km.writeButton, false);
     return;
   }
-  // G19B: macros saved/assigned since the last Apply ride the SAME apply
-  // path (the matrix write stages the 0x04/0x05 reports), so the existing
-  // dirty indicator names them — the write button shows even with zero key
-  // diffs when macros are pending. G9 FIX E grammar rules still hold.
-  const macroPending = macro.dirty;
-  const suffix = macroPending ? " · macros waiting for Apply" : "";
+  // G19B: macros saved/assigned since the last board write ride the SAME
+  // apply path (the matrix write stages the 0x04/0x05 reports), so the
+  // existing dirty indicator names them — the write button shows even with
+  // zero key diffs when macros are pending. G9 FIX E grammar rules still
+  // hold. G19B-FIX1 F1+F2: the suffix names the REAL control (built from
+  // MACRO_WRITE_BUTTON_LABEL) and keys off the snapshot compare, not a flag.
+  const macroPending = macroWritePending();
+  const suffix = macroPending ? ` · ${MACRO_PENDING_NOTE}` : "";
   setText(km.dirtyCounter, `${count} unsaved change${count === 1 ? "" : "s"}${suffix}`);
   // G9 FIX E: the write button only exists while there is something to write,
   // and its label is grammatical (never "N key(s)").
   let label;
   if (count === 0) {
-    label = macroPending ? "Write macros to keyboard" : "Write keys to keyboard";
+    label = macroPending ? MACRO_WRITE_BUTTON_LABEL : "Write keys to keyboard";
   } else {
     label = `Write ${count} key${count === 1 ? "" : "s"}`
       + (macroPending ? " + macros" : "") + " to keyboard";
@@ -1842,7 +1900,7 @@ function renderKeymapCodeList() {
       item.title = isMacro
         ? (entry.filled
           ? `${entry.name} — stored on this computer; assign it to this `
-            + "keycap, then press Apply to write it to the board"
+            + `keycap, then press ${MACRO_WRITE_BUTTON_LABEL} to write it to the board`
           : `${entry.name} has no content yet — save it in the Macro Editor first`)
         : (entry.aliases && entry.aliases.length
           ? `${entry.name} — search: ${entry.aliases.join(", ")}`
@@ -1913,8 +1971,8 @@ function renderKeymapEditor() {
     if (macroId !== null) {
       setText(km.editorMacro,
         `${macroLabel(macroId)} assigned (stored on this computer) — `
-        + "press Apply to write it to the board. Picking a normal key below "
-        + "replaces the assignment.");
+        + `press ${MACRO_WRITE_BUTTON_LABEL} to write it to the board. `
+        + "Picking a normal key below replaces the assignment.");
     }
     toggleHidden(km.editorMacro, macroId === null);
   }
@@ -1978,10 +2036,11 @@ function setBufferCode(code) {
 
 async function writeKeymapBuffer() {
   const count = keymapDirtyCount();
-  // G19B: a macros-only Apply is legitimate — same path, whole buffer POSTed
-  // (zero key diffs = the same matrix bytes) while the server stages every
-  // stored macro (0x04 table + 0x05 data) after the matrix write.
-  if (!keymapIsEditable() || (count === 0 && !macro.dirty)) return;
+  // G19B: a macros-only board write is legitimate — same path, whole buffer
+  // POSTed (zero key diffs = the same matrix bytes) while the server stages
+  // every stored macro (0x04 table + 0x05 data) after the matrix write.
+  // G19B-FIX1 F2: "macros waiting" is the snapshot compare, never a flag.
+  if (!keymapIsEditable() || (count === 0 && !macroWritePending())) return;
   // G12: snapshot the first dirty slot + its target code BEFORE the write
   // resets the baseline, so the matcher arms against the code we just wrote.
   const verifySlot = firstDirtyKeymapSlot();
@@ -1995,7 +2054,9 @@ async function writeKeymapBuffer() {
   if (payload.ok) {
     // G19B: this write staged every stored macro too (server apply order:
     // bind → matrix → 0x04 → 0x05 → re-assert) — macros are on the board.
-    macro.dirty = false;
+    // G19B-FIX1 F2: refresh the snapshot so the chip/button pending state is
+    // exactly "store changed since THIS write".
+    macro.snapshot = macroStoreSnapshot(state.macros, state.macroSlots);
     await fetchKeystate();
     paintKeymapWriteBanner(payload); // G16: after the resettable keystate repaint
     if (verifySlot != null && verifyExpect && verifyExpect.length) {
@@ -2019,9 +2080,14 @@ async function resetKeymapActiveProfile() {
   const payload = await postAction("reset-keymap", null);
   keymap.busy = false;
   if (payload.ok) {
-    // G19B: the reset path stages stored macros as well (library stays,
-    // assignments were cleared server-side) — nothing macro is pending now.
-    macro.dirty = false;
+    // G19B: the reset path stages stored macros as well — and the store
+    // companion clears EVERY assignment for this profile/layer (library
+    // stays). Mirror that server truth locally, then G19B-FIX1 F2 refreshes
+    // the snapshot so the chip reads exactly "store changed since THIS
+    // write" (the old dirty=false left the slot mirror stale until the next
+    // state fetch).
+    state.macroSlots = {};
+    macro.snapshot = macroStoreSnapshot(state.macros, state.macroSlots);
     await fetchKeystate();
     paintKeymapWriteBanner(payload); // G16: the reset names its profile too
   } else {
@@ -2291,6 +2357,7 @@ const macroEl = {
   stepAdd: document.getElementById("macro-step-add"),
   save: document.getElementById("macro-save"),
   status: document.getElementById("macro-status"),
+  footer: document.querySelector(".macro-footer-note"),
 };
 
 const macro = {
@@ -2298,9 +2365,20 @@ const macro = {
   draft: null, // {name, repeat, steps: [{down, code, delay}]}
   recording: false,
   lastTs: 0,
-  dirty: false, // store changes (save/delete/assign) waiting for Apply
+  // G19B-FIX1 F2: canonical store snapshot (macros + assignments) captured
+  // at page load and refreshed after every SUCCESSFUL board write. Pending
+  // == current store differs from this — see macroWritePending(). null =
+  // store not loaded yet (never claims pending). The old `dirty` flag lied:
+  // any ok POST set it, nothing but a write cleared it.
+  snapshot: null,
   busy: false, // a /api/macro/* request is in flight
 };
+
+// G19B-FIX1 F2: THE pending answer for chip + both write buttons — the
+// store differing from the last written/loaded snapshot.
+function macroWritePending() {
+  return macroStoreDiffers(state.macros, state.macroSlots, macro.snapshot);
+}
 
 // Slot -> MacroID from the LOCAL mirror (digit-string keys), or null.
 function macroForSlot(slot) {
@@ -2335,7 +2413,10 @@ async function postMacroRoute(path, body) {
       state.macros = payload.macros;
       state.macroSlots = payload.macro_slots || {};
     }
-    if (payload && payload.ok) macro.dirty = true;
+    // G19B-FIX1 F2: a store POST does NOT set a pending flag any more — the
+    // mirror update above already makes the store differ from the last
+    // write snapshot, which is exactly when the chip should light up (and
+    // when it should not: delete-then-undo leaves nothing waiting).
     return payload;
   } catch (error) {
     return { ok: false, message: `Macro request failed: ${error}` };
@@ -2442,7 +2523,8 @@ function deleteMacro(id) {
   const steps = entry && Array.isArray(entry.events) ? entry.events.length : 0;
   const uses = macroUseCount(state.macroSlots, id);
   const note = uses
-    ? ` ${macroUseLabel(uses)}; those keys revert to their stored key on the next Apply.`
+    ? ` ${macroUseLabel(uses)}; those keys revert to their stored key the next time `
+      + `you press ${MACRO_WRITE_BUTTON_LABEL}.`
     : "";
   if (!window.confirm(`Delete ${macroNameOrLabel(state.macros, id)} `
     + `(${steps} step(s)) from this computer?${note}`)) {
@@ -2585,13 +2667,16 @@ function renderMacroSteps() {
     pill.type = "button";
     pill.className = `macro-step-pill ${step.down ? "is-down" : "is-up"}`;
     pill.textContent = step.down ? "Down" : "Up";
-    pill.title = step.down ? "This step presses the key down — click for Up"
-      : "This step releases the key — click for Down";
+    // G19B-FIX1 F5: the pill toggles the step's down flag in place (the click
+    // handler re-renders the row). The tooltip names exactly that action.
+    pill.title = "Toggle this step between key press and key release";
     pill.disabled = macro.recording;
     pill.addEventListener("click", () => {
       step.down = !step.down;
       renderMacroSteps();
     });
+    const delayCell = document.createElement("span");
+    delayCell.className = "macro-step-delay-cell";
     const delay = document.createElement("input");
     delay.type = "number";
     delay.min = "1";
@@ -2600,7 +2685,15 @@ function renderMacroSteps() {
     delay.className = "macro-step-delay";
     delay.value = String(step.delay);
     delay.title = "Milliseconds to wait AFTER emitting this step (1..65535)";
+    // G19B-FIX1 F3: the bare number is self-describing — a muted 'ms' suffix
+    // sits beside it — and every delay input carries an aria-label.
+    delay.setAttribute("aria-label", `Step ${i + 1} delay in milliseconds`);
     delay.disabled = macro.recording;
+    const delayUnit = document.createElement("span");
+    delayUnit.className = "macro-step-delay-unit";
+    delayUnit.textContent = MACRO_STEP_DELAY_UNIT;
+    delayUnit.setAttribute("aria-hidden", "true");
+    delayCell.append(delay, delayUnit);
     delay.addEventListener("change", () => {
       const raw = Number(delay.value);
       if (!Number.isInteger(raw) || raw < 1 || raw > 65535) {
@@ -2617,12 +2710,15 @@ function renderMacroSteps() {
     remove.className = "macro-step-remove";
     remove.textContent = "×";
     remove.title = `Remove step ${i + 1}`;
+    // G19B-FIX1 F3: ≥24px hit target (see .macro-step-remove), higher-contrast
+    // × — and a spoken name, not just the glyph.
+    remove.setAttribute("aria-label", `Remove step ${i + 1}`);
     remove.disabled = macro.recording;
     remove.addEventListener("click", () => {
       steps.splice(i, 1);
       renderMacroSteps();
     });
-    row.append(idx, keyEl, pill, delay, remove);
+    row.append(idx, keyEl, pill, delayCell, remove);
     macroEl.steps.appendChild(row);
   }
   setText(macroEl.stepCount, `${steps.length}/${MACRO_MAX_STEPS}`);
@@ -2678,18 +2774,26 @@ function renderMacroPanel() {
     macroEl.list.appendChild(row);
   }
   // Header chip: the honest store state (never "on the keyboard").
-  setText(macroEl.stateChip, macro.dirty
-    ? "macros waiting for Apply"
+  // G19B-FIX1 F1+F2: the pending wording is the canonical MACRO_PENDING_NOTE
+  // (names the real control) and lights up only while the store DIFFERS
+  // from the last written/loaded snapshot — a delete that empties the store
+  // again shows no fake "waiting" state.
+  const macroPending = macroWritePending();
+  setText(macroEl.stateChip, macroPending
+    ? MACRO_PENDING_NOTE
     : (stored === 1
       ? "1 macro stored on this computer"
       : (stored > 1
         ? `${stored} macros stored on this computer`
         : "no macros stored yet")));
-  if (macroEl.stateChip) macroEl.stateChip.classList.toggle("is-pending", macro.dirty);
-  // Clear visual Apply-affordance (plan) while store changes await Apply —
-  // same action as the Remap panel's write button (one apply path).
-  toggleHidden(macroEl.apply, !macro.dirty || macro.recording);
+  if (macroEl.stateChip) macroEl.stateChip.classList.toggle("is-pending", macroPending);
+  // Clear visual board-write affordance (plan) while store changes await it —
+  // one apply path, and its name is spelled out by MACRO_WRITE_BUTTON_LABEL.
+  toggleHidden(macroEl.apply, !macroPending || macro.recording);
   if (macroEl.apply) macroEl.apply.disabled = macro.busy || !keymapIsEditable();
+  // F1: the footer note is the canonical template — the static HTML copy is
+  // identical, this keeps every render honest to the single source.
+  setText(macroEl.footer, MACRO_FOOTER_NOTE);
 
   const hasEditor = macro.selectedId !== null && macro.draft !== null;
   toggleHidden(macroEl.editor, !hasEditor);

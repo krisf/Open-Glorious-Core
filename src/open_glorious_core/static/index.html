@@ -349,8 +349,8 @@
                      macros — this keyboard cannot report macros back (live evidence,
                      2026-11-15), so everything shown here reflects what THIS app
                      saved, never a device read. Nothing reaches the board until the
-                     operator presses Apply (the keymap write path also stages the
-                     macro reports, in MacroID order). -->
+                     operator presses Write macros to keyboard (the keymap write path
+                     also stages the macro reports, in MacroID order). -->
                 <section id="macro-section" class="panel control-panel macro-panel">
                     <div class="panel-heading macro-head">
                         <div>
@@ -360,7 +360,7 @@
                         <div class="macro-head-actions">
                             <span id="macro-state-chip" class="keymap-dirty-counter">no macros stored yet</span>
                             <button id="macro-apply" class="button keymap-write-pending is-hidden" type="button"
-                                title="Same Apply as the Remap panel: writes the key matrix plus every stored macro to the keyboard.">
+                                title="The same write button as the Remap panel: writes the key matrix plus every stored macro to the keyboard.">
                                 Write macros to keyboard</button>
                         </div>
                     </div>
@@ -418,7 +418,7 @@
                                     </select>
                                     <label class="macro-add-delay"><span>Delay ms</span>
                                         <input id="macro-step-delay" type="number" min="1" max="65535" step="1"
-                                            value="50">
+                                            value="50" aria-label="New step delay in milliseconds">
                                     </label>
                                     <button id="macro-step-add" class="button button-secondary" type="button">Add
                                         step</button>
@@ -428,8 +428,8 @@
                                     <span id="macro-status" class="macro-status" role="status"></span>
                                 </div>
                             </div>
-                            <p class="macro-footer-note">Macros live in your profile; click Apply (top-right) to write
-                                them to the board.</p>
+                            <p class="macro-footer-note">Macros live in your profile; click Write macros to
+                                keyboard to write them to the board.</p>
                         </div>
                     </div>
                 </section>
