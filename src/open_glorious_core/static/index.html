@@ -95,7 +95,7 @@
                                 <p class="surface-kicker">Per-key RGB</p>
                                 <h4>Per-key colors</h4>
                             </div>
-                            <span id="per-key-chip" class="keymap-dirty-counter" role="status">0 keys colored</span>
+                            <span id="per-key-chip" class="per-key-chip" role="status">0 keys colored</span>
                         </div>
                         <div class="performance-row">
                             <label class="toggle" for="per-key-enable">
@@ -122,9 +122,10 @@
                                 </label>
                             </div>
                             <div class="per-key-actions">
-                                <button id="per-key-reset-all" class="button button-secondary" type="button">Reset all keys</button>
-                                <button id="per-key-clear-all" class="button button-secondary" type="button">Clear all</button>
+                                <button id="per-key-reset-all" class="button button-secondary" type="button">Paint every key white</button>
+                                <button id="per-key-clear-all" class="button button-secondary" type="button">Remove all colors</button>
                             </div>
+                            <p class="per-key-actions-note">Paint every key white to reset; remove colors individually or all at once.</p>
                         </div>
                         <p class="per-key-hint">Per-key colors are stored in your profile on this computer and re-sent to the keyboard on every Apply — this keyboard cannot report its colors back, so what you painted here is the source of truth.</p>
                     </div>
@@ -143,9 +144,11 @@
                         <div id="per-key-strip" class="per-key-strip is-hidden" role="status">
                             <span id="per-key-strip-label">—</span>
                             <span class="per-key-strip-actions">
-                                <button id="per-key-vis-off" class="button button-secondary" type="button">Set OFF</button>
+                                <button id="per-key-vis-off" class="button button-secondary" type="button"
+                                    title="Keep the color but mark the key dark (0x00)">Turn key OFF</button>
                                 <button id="per-key-vis-breath" class="button button-secondary" type="button">Breathing</button>
-                                <button id="per-key-clear-slot" class="button button-secondary" type="button">Clear color</button>
+                                <button id="per-key-clear-slot" class="button button-secondary" type="button"
+                                    title="Delete this slot from your per-key layout">Remove color</button>
                             </span>
                         </div>
                         <div id="color-group-tabs" class="color-group-tabs"></div>
@@ -214,7 +217,7 @@
                     </div>
                     <div class="performance-row">
                         <span class="performance-label">Side lights</span>
-                        <label class="toggle" for="side-lights-toggle">
+                        <label class="toggle performance-toggle" for="side-lights-toggle">
                             <input id="side-lights-toggle" type="checkbox">
                             <span class="toggle-track" aria-hidden="true"></span>
                             <span class="toggle-text">Light bar on</span>
@@ -224,13 +227,20 @@
                          Apply's properties report (byte [5]); firmware
                          support on this board is still being verified, and
                          there is no readback — the toggle never claims the
-                         app can see the lock state on the device. -->
+                         app can see the lock state on the device. G19A-FIX1
+                         D1 restyles the row to the side-lights pattern
+                         exactly: setting name + muted subtitle under the
+                         LEFT label, the toggle in the SAME fixed right-edge
+                         column with a short inline status text. -->
                     <div class="performance-row">
-                        <span class="performance-label">Windows key</span>
-                        <label class="toggle" for="win-lock-toggle">
+                        <div class="performance-label-stack">
+                            <span class="performance-label">Windows Key Lock</span>
+                            <small>Blocks the Windows key — takes effect on Apply; support varies by firmware</small>
+                        </div>
+                        <label class="toggle performance-toggle" for="win-lock-toggle">
                             <input id="win-lock-toggle" type="checkbox">
                             <span class="toggle-track" aria-hidden="true"></span>
-                            <span class="toggle-text"><strong>Windows Key Lock</strong><small>Blocks the Windows key (requires Apply; support varies by firmware).</small></span>
+                            <span class="toggle-text" id="win-lock-status">Windows key unlocked</span>
                         </label>
                     </div>
                 </section>

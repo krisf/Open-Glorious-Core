@@ -22,7 +22,7 @@ const state = {
   perKey: null, // {enabled, brightness, slots} exactly as the store keeps it
   perKeyEdit: false, // Edit mode switch: keycap clicks target the color panel
   perKeySlot: null, // slot the shared picker is currently targeting
-  perKeyBusy: false, // bulk op (Reset all / Clear all) in flight
+  perKeyBusy: false, // bulk op (Paint all / Remove all) in flight
 };
 
 const els = {
@@ -61,6 +61,7 @@ const els = {
   // G19A: win-lock toggle + per-key colors subsection (Lighting card) +
   // the slot-target strip inside the custom color card.
   winLockToggle: document.getElementById("win-lock-toggle"),
+  winLockStatus: document.getElementById("win-lock-status"),
   perKeyEnable: document.getElementById("per-key-enable"),
   perKeyChip: document.getElementById("per-key-chip"),
   perKeyControls: document.getElementById("per-key-controls"),
@@ -314,7 +315,51 @@ function perKeyClickOpensColorPanel(enabled, editMode) {
 function perKeyClickOpensDrawer(enabled, editMode) {
   return !perKeyClickOpensColorPanel(enabled, editMode);
 }
+
+// G19A-FIX1 D1: the ONE status-text map for the win-lock row — the
+// Performance render maps the saved boolean through this function, and no
+// other place in the app spells these two strings (the toggle sits in the
+// fixed right-edge column exactly like side-lights' "Light bar on").
+function winLockStatusText(winLock) {
+  return winLock ? "Windows key locked" : "Windows key unlocked";
+}
+
+// G19A-FIX1 D2: ONE canonical slot-label source. The strip label AND the
+// picker subtitle both format through perKeySlotTag (numbers stay NUMBERS —
+// G18 radix lesson), so the slot number shown in the two places can never
+// drift apart, and the subtitle can never contradict the strip.
+function perKeySlotTag(slot) {
+  return `Slot ${Number(slot)}`;
+}
+
+function perKeyStripLabel(slot, entry) {
+  const tag = perKeySlotTag(slot);
+  if (!entry) {
+    return `${tag} · no color saved yet — picking one stores it as Lit (${perKeyVisLabel("lit")})`;
+  }
+  return `${tag} · ${perKeyVisName(entry.vis)} (${perKeyVisLabel(entry.vis)})`;
+}
+
+// Strip active -> the slot subtitle; strip hidden -> the caller's original
+// effect subtitle is restored verbatim.
+function perKeyPickerSubtitle(stripActive, slot, effectSubtitle) {
+  return stripActive ? `Editing the color of ${perKeySlotTag(slot)}` : effectSubtitle;
+}
 // [PURE-PERKEY-END]
+
+// [PURE-PICKER-START]
+// Pure, DOM-free picker math (G19A-FIX1 D5). Extracted verbatim between
+// these markers and unit-tested headlessly by tests/test_perkey_js.py
+// (node). The SV handle sits at (saturation * width, (1 - value) * height);
+// at the extreme corners the container's rounding clipped the circle, so
+// positioning clamps the offset into [radius, dimension - radius].
+function pickerHandleOffset(raw, dimension, radius) {
+  const r = Number(radius);
+  const lo = r;
+  const hi = Math.max(Number(dimension) - r, r);
+  return Math.max(lo, Math.min(hi, Number(raw)));
+}
+// [PURE-PICKER-END]
 
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
@@ -400,8 +445,20 @@ function renderPicker() {
     els.customColorSurface.style.setProperty("--picker-hue", String(Math.round(state.picker.hue)));
   }
   if (els.customColorHandle) {
-    els.customColorHandle.style.left = `${state.picker.saturation * 100}%`;
-    els.customColorHandle.style.top = `${(1 - state.picker.value) * 100}%`;
+    // G19A-FIX1 D5: inset the handle by half its diameter — clamp its
+    // left/top into [r, width-r] / [r, height-r] so the full circle stays
+    // visible at the container corners. The saturation/value mapping itself
+    // is unchanged.
+    const rect = els.customColorSurface ? els.customColorSurface.getBoundingClientRect() : null;
+    if (rect && rect.width > 0 && rect.height > 0) {
+      const radius = (els.customColorHandle.offsetWidth || 18) / 2;
+      els.customColorHandle.style.left = `${pickerHandleOffset(state.picker.saturation * rect.width, rect.width, radius)}px`;
+      els.customColorHandle.style.top = `${pickerHandleOffset((1 - state.picker.value) * rect.height, rect.height, radius)}px`;
+    } else {
+      // No measured surface (detached/pre-layout): keep the percentage math.
+      els.customColorHandle.style.left = `${state.picker.saturation * 100}%`;
+      els.customColorHandle.style.top = `${(1 - state.picker.value) * 100}%`;
+    }
   }
   if (els.customColorHue) {
     els.customColorHue.value = String(Math.round(state.picker.hue));
@@ -573,6 +630,28 @@ function renderColorGroupTabs(activeEffect) {
   return groups;
 }
 
+// G19A-FIX1 D2: the ORIGINAL (strip-inactive) picker subtitle strings live
+// in ONE place.
+function effectColorSubtitle(groups) {
+  if (!groups.length) {
+    return "This effect currently uses the firmware palette and does not expose custom colors in this Linux app yet.";
+  }
+  return groups.length > 1
+    ? "Choose a color group tab, then set the color for that part of the effect."
+    : "This effect supports a single custom color.";
+}
+
+// G19A-FIX1 D2: the picker subtitle ALWAYS renders through the ONE canonical
+// perKeyPickerSubtitle — an active per-key slot strip swaps in
+// 'Editing the color of Slot N' (same slot state that drives the strip
+// label); an inactive strip restores the effect subtitle verbatim.
+function renderColorSubtitle(groups) {
+  setText(
+    els.colorSupportMessage,
+    perKeyPickerSubtitle(perKeyTargetActive(), state.perKeySlot, effectColorSubtitle(groups)),
+  );
+}
+
 function updateColorControls(activeEffect) {
   const groups = renderColorGroupTabs(activeEffect);
   const supportsColor = groups.length > 0;
@@ -584,16 +663,14 @@ function updateColorControls(activeEffect) {
 
   if (!supportsColor) {
     setText(els.colorPanelTitle, "Not Available For This Effect");
-    setText(els.colorSupportMessage, "This effect currently uses the firmware palette and does not expose custom colors in this Linux app yet.");
     state.activeColorGroup = null;
-    return;
+  } else {
+    setText(els.colorPanelTitle, groups.length > 1 ? "Group Colors" : "Picker, Hex & RGB");
+    if (!state.activeColorGroup) {
+      state.activeColorGroup = groups[0] || null;
+    }
   }
-
-  setText(els.colorPanelTitle, groups.length > 1 ? "Group Colors" : "Picker, Hex & RGB");
-  setText(els.colorSupportMessage, groups.length > 1 ? "Choose a color group tab, then set the color for that part of the effect." : "This effect supports a single custom color.");
-  if (!state.activeColorGroup) {
-    state.activeColorGroup = groups[0] || null;
-  }
+  renderColorSubtitle(groups);
 }
 
 document.addEventListener("contextmenu", (event) => {
@@ -797,9 +874,11 @@ function renderPerformance() {
     els.sideLightsToggle.checked = state.sideLights;
   }
   // G19A: the win-lock toggle follows the saved flag (store value — there is
-  // no device readback for it on this board).
+  // no device readback for it on this board). G19A-FIX1 D1: the short inline
+  // status text renders through the ONE status map (winLockStatusText).
   if (els.winLockToggle && state.winLock != null) {
     els.winLockToggle.checked = state.winLock;
+    setText(els.winLockStatus, winLockStatusText(state.winLock));
   }
 }
 
@@ -816,8 +895,8 @@ async function postPerKey(routeKey, value) {
       body: JSON.stringify({ value }),
     });
     const payload = await response.json();
-    // Bulk ops (Reset all / Clear all) suppress the per-op re-render; the
-    // final fetchState() renders everything once.
+    // Bulk ops (Paint every key white / Remove all colors) suppress the
+    // per-op re-render; the final fetchState() renders everything once.
     if (!state.perKeyBusy) applyPayload(payload);
     return payload;
   } catch (error) {
@@ -856,17 +935,17 @@ function renderPerKeyStrip() {
     // Leaving target mode must also drop the picker's slot-target ring state.
     if (els.perKeyVisOff) els.perKeyVisOff.classList.remove("is-active");
     if (els.perKeyVisBreath) els.perKeyVisBreath.classList.remove("is-active");
+    // G19A-FIX1 D2: strip hidden -> the original effect subtitle is restored.
+    renderColorSubtitle(getColorGroups(getActiveEffectId()));
     return;
   }
   const slots = (state.perKey && state.perKey.slots) || {};
   const entry = slots[String(state.perKeySlot)];
   const vis = entry ? entry.vis : "lit";
-  setText(
-    els.perKeyStripLabel,
-    entry
-      ? `Slot ${state.perKeySlot} · ${perKeyVisName(vis)} (${perKeyVisLabel(vis)})`
-      : `Slot ${state.perKeySlot} · no color saved yet — picking one stores it as Lit (${perKeyVisLabel("lit")})`,
-  );
+  // G19A-FIX1 D2: the strip label AND the picker subtitle render from the
+  // same slot state through the canonical pure functions.
+  setText(els.perKeyStripLabel, perKeyStripLabel(state.perKeySlot, entry));
+  renderColorSubtitle(getColorGroups(getActiveEffectId()));
   if (els.perKeyVisOff) els.perKeyVisOff.classList.toggle("is-active", vis === "off");
   if (els.perKeyVisBreath) els.perKeyVisBreath.classList.toggle("is-active", vis === "breath");
 }
@@ -896,8 +975,8 @@ async function writePerKeySlotVis(vis) {
   if (!perKeyTargetActive()) return;
   const slots = (state.perKey && state.perKey.slots) || {};
   const entry = slots[String(state.perKeySlot)];
-  // "Set OFF" on an already-OFF slot toggles back to Lit (three modes, two
-  // chips, per the plan).
+  // "Turn key OFF" on an already-OFF slot toggles back to Lit (three modes,
+  // two chips, per the plan).
   const nextVis = entry && entry.vis === vis ? "lit" : vis;
   const rgb = entry && Array.isArray(entry.rgb) && entry.rgb.length === 3
     ? entry.rgb
@@ -1040,6 +1119,10 @@ if (els.perKeyClearAll) {
   els.perKeyClearAll.addEventListener("click", () => {
     const slots = state.perKey && state.perKey.slots
       ? Object.keys(state.perKey.slots) : [];
+    // G19A-FIX1 D4: the destructive bulk removal is gated behind ONE
+    // confirm() — it must fire BEFORE any fetch, and cancel aborts
+    // silently (no API call, no state change).
+    if (!window.confirm(`Remove all ${slots.length} stored key colors?`)) return;
     runPerKeyBulk(slots.map((slot) => ({ route: "clear", value: Number(slot) })));
   });
 }
