@@ -6,7 +6,8 @@ truth, do NOT re-derive):
 * Properties report (cmd 0x07): byte [5] is Win_Lock — the vendor HARDCODES
   0 (no win-lock UI ships for this board). Our toggle defaults UNLOCKED so
   the default wire stays byte-identical; flipping it changes ONLY byte [5].
-* Per-key layout (cmd 0x06, standalone 264-byte report): [2]/[3] are the
+* Per-key layout (cmd 0x06, standalone 264-byte report, sent as 256 WIRE
+  bytes since G19-FIX2 — vendor KeyMatrixLength <= 120 rule): [2]/[3] are the
   profile/layer selectors, [4]=KeyNumber 83, [5]=page 0..2,
   [6]=round(per-key brightness * 20 / 100), and [8..207] carry the 200-byte
   page slice of the 600-byte layout buffer (120 slots x 5 bytes:
@@ -37,6 +38,7 @@ from open_glorious_core import app as app_module
 from open_glorious_core import store
 from open_glorious_core.backend import (
     CMD_SET_LAYOUT,
+    G19_WIRE_LENGTH,
     PER_KEY_KEY_NUMBER,
     PER_KEY_LAYOUT_BYTES,
     PER_KEY_PAGE_BYTES,
@@ -268,7 +270,9 @@ def test_enabled_apply_sends_properties_effect_pages_then_profile(wired) -> None
     pages = _cmd_reports(fake, CMD_SET_LAYOUT)
     assert len(pages) == 3, "three pages, sent sequentially"
     for page_index, page in enumerate(pages):
-        assert len(page) == 264
+        # G19-FIX2: 256 WIRE bytes of the 264-byte buffer (vendor
+        # KeyMatrixLength <= 120 rule; 264 stalls the WB board).
+        assert len(page) == G19_WIRE_LENGTH == 256
         assert page[0] == 0x07
         assert page[2] == backend.profile
         assert page[3] == backend.layer

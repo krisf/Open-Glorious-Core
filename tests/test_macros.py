@@ -28,6 +28,10 @@ truth, do NOT re-derive):
 * NO macro readback exists (live evidence 2026-11-15; the GET mirror is the
   blank shadow). THE STORE IS THE TRUTH — no route, panel or message in this
   feature ever claims to read macros off the keyboard.
+* G19-FIX2 (2026-11-16): both macro reports keep their 264-byte BUFFER but
+  go on the wire as the first 256 bytes (vendor KeyMatrixLength <= 120 rule;
+  264 stalls the WB board). Wire captures are 256 bytes; builder buffers
+  stay 264.
 
 Zero device I/O: conftest hard-blocks real IO; FakeHIDDevice captures the
 byte-exact reports at the IO boundary.
@@ -48,6 +52,7 @@ from open_glorious_core import store
 from open_glorious_core.backend import (
     CMD_MACRO_DATA,
     CMD_MACRO_TYPE_TABLE,
+    G19_WIRE_LENGTH,
     MACRO_MAX_EVENTS,
     MACRO_PAYLOAD_BYTES,
     MACRO_REPORT_LENGTH,
@@ -256,7 +261,9 @@ def test_write_helpers_send_one_report_each(wired):
     backend, fake = wired
     message = backend.write_macro_type_table(1, 1, {20: 1})
     assert len(fake.capture) == 1
-    assert len(fake.capture[0]) == 264 and fake.capture[0][1] == CMD_MACRO_TYPE_TABLE
+    # G19-FIX2: the type table goes out as 256 WIRE bytes of its 264-byte
+    # buffer (vendor KeyMatrixLength <= 120 rule; 264 stalls the WB board).
+    assert len(fake.capture[0]) == G19_WIRE_LENGTH == 256 and fake.capture[0][1] == CMD_MACRO_TYPE_TABLE
     assert "cmd 4" in message
     fake.capture.clear()
     message = backend.write_macro_data(3, EVENTS3)
@@ -445,7 +452,8 @@ def test_apply_stages_macros_in_plan_order(fake_hid, monkeypatch):
     data = _cmd_reports(fake, CMD_MACRO_DATA)[-1]
     assert (data[1], data[2]) == (0x05, 0x03)  # cmd, MacroID 3 (UI label M4)
     assert bytes(data[8:17]) == PINNED_STREAM
-    assert all(not data[i] for i in range(17, 264))
+    # G19-FIX2: scan the WIRE (256), not the 264-byte builder buffer.
+    assert all(not data[i] for i in range(17, len(data)))
 
     # Bind + trailing re-assert both name the same pair (raw 1-based values).
     binds = _cmd_reports(fake, 0x01)
@@ -567,8 +575,8 @@ def test_apply_all_three_repeat_modes_and_macro_id_order(fake_hid, monkeypatch):
     assert (table[8 + 40 * 2], table[8 + 40 * 2 + 1]) == (0xFF, 0xFF)  # repeat 1
     assert (table[8 + 60 * 2], table[8 + 60 * 2 + 1]) == (0x00, 0x00)  # repeat 2
     # Header [0..3] + the three FFs + the single 01 are the ONLY nonzero bytes
-    # => EVERY OTHER slot is 00 00, byte-exactly.
-    assert {i for i in range(MACRO_REPORT_LENGTH) if table[i]} == {0, 1, 2, 3, 49, 88, 89}
+    # => EVERY OTHER slot is 00 00, byte-exactly (G19-FIX2: scan the WIRE).
+    assert {i for i in range(len(table)) if table[i]} == {0, 1, 2, 3, 49, 88, 89}
 
     # Macro cells: type 0x05, code = MacroID; every other cell = HEAD rules.
     matrix = fake.matrices[-1]
@@ -588,7 +596,7 @@ def test_apply_all_three_repeat_modes_and_macro_id_order(fake_hid, monkeypatch):
     assert [r[2] for r in data] == [0, 1, 2]  # MacroID order, one report each
     for report in data:
         assert bytes(report[8:17]) == PINNED_STREAM
-        assert all(not report[i] for i in range(17, MACRO_REPORT_LENGTH))
+        assert all(not report[i] for i in range(17, len(report)))
 
 
 # --- keystate + import/export -----------------------------------------------------

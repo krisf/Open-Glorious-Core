@@ -73,12 +73,15 @@ def backend() -> StockGmmkProBackend:
 class FakeHIDDevice:
     """Shared wire-level fake-HID double (G12 E2E).
 
-    Records EVERY ``_send_feature_report`` (the raw 257-byte wire payload) in
-    ``capture`` and answers the GET config mirror (0x81) with a fully BLANK
-    response — the live GMMK Pro WB (320F:5092) shadow-buffer state where the
-    mirror never populates. ``sets`` is the same list as ``capture`` under the
-    name the wire tests already use; ``matrices`` is the subset of captured
-    cmd-0x03 KeyMatrix reports (the write path the E2E test asserts on).
+    Records EVERY ``_send_feature_report`` CALL AS IT HITS THE WIRE in
+    ``capture``: the whole buffer, or its first ``wire_length`` bytes when
+    the caller overrides the ioctl length (G19-FIX2 — the three G19 commands
+    send 256 of their 264-byte buffers). Answers the GET config mirror (0x81)
+    with a fully BLANK response — the live GMMK Pro WB (320F:5092)
+    shadow-buffer state where the mirror never populates. ``sets`` is the
+    same list as ``capture`` under the name the wire tests already use;
+    ``matrices`` is the subset of captured cmd-0x03 KeyMatrix reports (the
+    write path the E2E test asserts on).
     """
 
     def __init__(self) -> None:
@@ -97,8 +100,13 @@ class FakeHIDDevice:
     def codes_of(self, report: bytes) -> bytes:
         return bytes(report[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS])
 
-    def _send_feature_report(self, report: bytes) -> None:
-        self.capture.append(bytes(report))
+    def _send_feature_report(self, report: bytes, wire_length: int | None = None) -> None:
+        # Mirror the real ioctl semantics (G19-FIX2): wire_length overrides
+        # how many buffer bytes go out; capture stores EXACTLY those bytes.
+        payload = bytes(report)
+        if wire_length is not None:
+            payload = payload[:wire_length]
+        self.capture.append(payload)
         if report[1] == CMD_KEY_MATRIX:
             self.matrix = bytes(
                 report[KEYMAP_CODES_OFFSET : KEYMAP_CODES_OFFSET + KEYMAP_SLOTS]

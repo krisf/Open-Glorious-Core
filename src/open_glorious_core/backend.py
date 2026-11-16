@@ -95,6 +95,19 @@ MACRO_TYPE_BY_REPEAT = {0: 0x0001, 1: 0xFFFF, 2: 0x0000}
 # Glorious CORE 2.1 extracted sources — ground truth" wins; tests pin 00 01.
 MACRO_TYPE_WIRE_PAIRS = {0: (0x00, 0x01), 1: (0xFF, 0xFF), 2: (0x00, 0x00)}
 
+# G19-FIX2 (device-proven 2026-11-16, operator present): the NEW G19 commands
+# — per-key layout 0x06, macro type table 0x04, macro data 0x05 — go on the
+# wire as the FIRST 256 BYTES of their 264-byte buffers. Vendor ground truth
+# (GmmkSeries.ts SetFeatureReport): KeyMatrixLength <= 120 sends
+# `hid.SetFeatureReport(DeviceId, 0x07, 256, buf)`; only >120-matrix boards
+# put 264 on the wire. On this GMMK Pro WB (320f:5092, KeyMatrixLength=120)
+# a 264-byte cmd-0x06 STALLS the board (EPIPE on the hidraw feature ioctl);
+# the 256-byte truncation is accepted on all 3 pages (operator confirmed
+# Esc lit red / Q lit blue at the correct keys). The older PHYSICALLY PROVEN
+# paths (properties 0x07, effect 0x02, keymap 0x03, bind 0x01, profile
+# update, polling 0x08) are NOT touched — they never pass this constant.
+G19_WIRE_LENGTH = 256
+
 # G18 P1 polling-rate wire map (vendor SetPollingRatetoDevice): a STANDALONE
 # 264-byte buffer (Buffer.alloc(264)) — not the 256-byte properties framing.
 # Data[0]=0x07 report ID, Data[1]=0x08 command, Data[8]=index into the rate
@@ -861,7 +874,9 @@ class StockGmmkProBackend(BaseBackend):
         for page in range(PER_KEY_PAGE_COUNT):
             page_report = bytearray(PER_KEY_LAYOUT_REPORT_LENGTH)
             self._prepare_per_key_layout_buffer(page_report, page)
-            self._send_feature_report(page_report)
+            # G19-FIX2: 256 wire bytes of the 264-byte buffer (vendor
+            # KeyMatrixLength <= 120 rule; 264 stalls this board).
+            self._send_feature_report(page_report, wire_length=G19_WIRE_LENGTH)
         return (
             f"Sent the per-key layout in {PER_KEY_PAGE_COUNT} pages "
             "(colors come from this computer's store — the board has no readback)."
@@ -1073,7 +1088,8 @@ class StockGmmkProBackend(BaseBackend):
         if not self.hidraw:
             raise BackendError(self.install_hint())
         report = self._build_macro_type_table_report(profile, layer, assignments)
-        self._send_feature_report(report)
+        # G19-FIX2: 256 wire bytes (same vendor rule as the cmd-0x06 pages).
+        self._send_feature_report(report, wire_length=G19_WIRE_LENGTH)
         return (
             f"Sent the macro type table for profile {profile} layer {layer} "
             f"({len(assignments)} assigned slot(s), cmd 4)."
@@ -1084,7 +1100,8 @@ class StockGmmkProBackend(BaseBackend):
         if not self.hidraw:
             raise BackendError(self.install_hint())
         report = self._build_macro_data_report(macro_id, events)
-        self._send_feature_report(report)
+        # G19-FIX2: 256 wire bytes (payload [8..255] fully inside the wire).
+        self._send_feature_report(report, wire_length=G19_WIRE_LENGTH)
         return (
             f"Sent macro M{macro_id + 1} ({len(events)} step(s), cmd 5) — "
             "stored on this computer; this keyboard cannot report macros back."
@@ -1443,7 +1460,21 @@ class StockGmmkProBackend(BaseBackend):
             os.close(fd)
         return read_buf
 
-    def _send_feature_report(self, report: bytearray) -> None:
+    def _send_feature_report(
+        self, report: bytearray, wire_length: int | None = None
+    ) -> None:
+        """Write a feature report. ``wire_length`` (G19-FIX2) overrides how
+        many buffer bytes reach the wire: the three G19 commands pass
+        G19_WIRE_LENGTH (256 of the 264-byte buffer — vendor
+        KeyMatrixLength <= 120 rule; 264 stalls this board). ``None`` keeps
+        the historical full-buffer behaviour, len(report).
+        """
+        length = len(report) if wire_length is None else int(wire_length)
+        if not 1 <= length <= len(report):
+            raise BackendError(
+                f"Feature report wire length {length} does not fit the "
+                f"{len(report)}-byte buffer."
+            )
         try:
             fd = os.open(self.hidraw, os.O_RDWR)
         except PermissionError as exc:
@@ -1451,7 +1482,7 @@ class StockGmmkProBackend(BaseBackend):
                 f"Permission denied opening {self.hidraw}. Reload the udev rule and replug the keyboard."
             ) from exc
         try:
-            fcntl.ioctl(fd, _hid_iocsfeature(len(report)), report, True)
+            fcntl.ioctl(fd, _hid_iocsfeature(length), report, True)
         except OSError as exc:
             raise BackendError(f"Feature report failed on {self.hidraw.name}: {exc}") from exc
         finally:
