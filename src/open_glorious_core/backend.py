@@ -55,6 +55,46 @@ PER_KEY_BRIGHTNESS_LEVELS = 20  # byte [6]: round(brightness_percent * 20 / 100)
 # vis literal -> slot byte +0 (the vendor breathing intensity is 0xFE).
 PER_KEY_VIS_BYTES = {"off": 0x00, "lit": 0xFF, "breath": 0xFE}
 
+# G19B macros (G19B_PLAN.md, vendor Glorious CORE 2.1.22 `MacroToData` /
+# arrMacroType ground truth — do NOT re-derive):
+#
+# * Macro data: one 264-byte feature report per macro, cmd 0x05, [2]=MacroID,
+#   payload [8..255] (248 bytes) = a flat stream of 3-byte events; trailing
+#   zeros ARE the end marker. Event b0 = (delay >> 8) | 0x80 when keydown,
+#   b1 = delay & 0xFF (BIG-ENDIAN 16-bit ms), b2 = HID keycode from the same
+#   code space as the keymap. Keydown and keyup are separate events; the
+#   stream is time-sorted. 248 // 3 = 82 events maximum.
+# * Macro type table: ONE 264-byte report per profile/layer, cmd 0x04,
+#   [2]=profile [3]=layer (1-based, same convention as cmd 0x03), then 2
+#   bytes PER SLOT (slot i at [8 + i*2], big-endian u16) looked up in
+#   arrMacroType by repeat type. Vendor skips the send entirely when no cell
+#   carries a macro.
+# * Matrix integration: a macro-assigned cell is type 0x05 with code =
+#   MacroID (vendor comment: 'key matrix type-0x05: Macro').
+# There is NO macro readback (blank shadow mirror — live evidence
+# 2026-11-15): the local store is truth, like per-key RGB.
+CMD_MACRO_TYPE_TABLE = 0x04
+CMD_MACRO_DATA = 0x05
+MACRO_REPORT_LENGTH = 264  # standalone 264-byte buffers (like cmd 0x06/0x08)
+MACRO_REPORT_PAYLOAD_OFFSET = 0x08
+MACRO_PAYLOAD_BYTES = 248  # 264 - 8 - 8 tail margin of the vendor buffer
+MACRO_EVENT_BYTES = 3
+MACRO_MAX_EVENTS = MACRO_PAYLOAD_BYTES // MACRO_EVENT_BYTES  # 82
+MACRO_KEYDOWN_FLAG = 0x80
+MACRO_DELAY_MAX = 0xFFFF
+MACRO_ID_MAX = 9  # MacroIDs 0..9 shown M1..M10 (product cap, not hardware)
+MACRO_TYPE_TABLE_BYTES_PER_SLOT = 2
+# arrMacroType repeat map (vendor literals, pinned by tests):
+MACRO_TYPE_BY_REPEAT = {0: 0x0001, 1: 0xFFFF, 2: 0x0000}
+# Wire pairs per slot ([8+i*2], [8+i*2+1]) — BIG-ENDIAN (ground-truth protocol
+# section, plan lines 24-31: "big-endian u16", values 0x0001/0xFFFF/0x0000).
+# NOTE ON THE PLAN'S TEST BULLET: its commit-3 line paraphrases mode 0 as
+# "0 -> 01 00"; that byte order CONTRADICTS the ground-truth section (BE of
+# 0x0001 is 00 01 — the modes 1/2 pairs FF FF/00 00 are order-symmetric and
+# cannot distinguish the two readings). The section labeled "verified against
+# Glorious CORE 2.1 extracted sources — ground truth" wins; tests pin 00 01.
+MACRO_TYPE_WIRE_PAIRS = {0: (0x00, 0x01), 1: (0xFF, 0xFF), 2: (0x00, 0x00)}
+
 # G18 P1 polling-rate wire map (vendor SetPollingRatetoDevice): a STANDALONE
 # 264-byte buffer (Buffer.alloc(264)) — not the 256-byte properties framing.
 # Data[0]=0x07 report ID, Data[1]=0x08 command, Data[8]=index into the rate
@@ -104,6 +144,91 @@ REPORT_ID_ECHO = 0x07
 # therefore caps-complete as shipped: a plain factory write restores CapsLock
 # (G11's slot-58 claim was a misattribution — the morning recovery wrote 0x39
 # to BOTH cells and the board answered via 60).
+
+def build_macro_events_bytes(events: list[dict]) -> bytes:
+    """Encode the cmd-0x05 macro byte stream (vendor `MacroToData`).
+
+    One 3-byte event per step, EXACTLY as pinned by G19B_PLAN.md:
+    ``b0 = (delay_ms >> 8) | 0x80 (keydown) else 0x00``,
+    ``b1 = delay_ms & 0xFF`` (big-endian 16-bit ms delta),
+    ``b2 = HID keycode`` (same code space as the keymap table).
+
+    Policy, stated once (plan: "Delay must be >= 1 (vendor clamps zero/
+    negative deltas to 1)"): THIS WRITER REJECTS delay < 1 instead of
+    silently clamping — the operator's authored timing must never be
+    rewritten behind their back (the API/store boundary rejects 0 too; the
+    test suite states "rejected" explicitly). delay > 65535 cannot encode
+    into the 16-bit big-endian field, and > 82 events cannot fit the
+    248-byte payload — both raise BackendError.
+
+    Events are dicts {"down": bool, "code": int, "delay": int}; the trailing
+    ZERO padding (the end marker) is the report builder's job.
+    """
+    events = list(events)
+    if len(events) > MACRO_MAX_EVENTS:
+        raise BackendError(
+            f"macro stream cap is {MACRO_MAX_EVENTS} events "
+            f"({MACRO_PAYLOAD_BYTES}-byte payload), got {len(events)}."
+        )
+    stream = bytearray()
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            raise BackendError(f"macro event {index} must be an object, got {event!r}.")
+        down = event.get("down")
+        code = event.get("code")
+        delay = event.get("delay")
+        if not isinstance(down, bool):
+            raise BackendError(f"macro event {index}: down must be a boolean, got {down!r}.")
+        if (
+            not isinstance(delay, int) or isinstance(delay, bool)
+            or not 1 <= delay <= MACRO_DELAY_MAX
+        ):
+            raise BackendError(
+                f"macro event {index}: delay must be an int 1..{MACRO_DELAY_MAX} ms — "
+                f"zero/negative delays are REJECTED by this writer (the vendor "
+                f"clamps them to 1), got {delay!r}."
+            )
+        if (
+            not isinstance(code, int) or isinstance(code, bool)
+            or not 0x00 <= code <= 0xFE
+        ):
+            raise BackendError(
+                f"macro event {index}: keycode must be 0x00..0xFE (0xFF is "
+                f"'unassigned', never a macro key), got {code!r}."
+            )
+        stream.append(((delay >> 8) | (MACRO_KEYDOWN_FLAG if down else 0x00)) & 0xFF)
+        stream.append(delay & 0xFF)
+        stream.append(code & 0xFF)
+    return bytes(stream)
+
+
+def build_macro_type_table_bytes(assignments: dict[int, int]) -> bytes:
+    """Encode the cmd 0x04 payload: 2 bytes per slot (240 bytes).
+
+    ``assignments`` maps slot -> repeat type (0 No Repeat, 1 Repeat While
+    Holding, 2 Toggle); the pair emitted at [i*2] is the big-endian
+    arrMacroType literal (0x0001 -> 00 01, 0xFFFF -> FF FF, 0x0000 -> 00 00
+    — see the MACRO_TYPE_WIRE_PAIRS note for the plan's contradictory test
+    bullet). Unassigned slots are 00 00. An EMPTY mapping yields the all-zero
+    table — callers SKIP the send in that case (vendor: the buffer is built
+    only when at least one MacroFunction cell exists).
+    """
+    table = bytearray(KEYMAP_SLOTS * MACRO_TYPE_TABLE_BYTES_PER_SLOT)
+    for slot, repeat in assignments.items():
+        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot < KEYMAP_SLOTS:
+            raise BackendError(f"macro type table: slot must be 0..{KEYMAP_SLOTS - 1}, got {slot!r}.")
+        try:
+            low_high = MACRO_TYPE_WIRE_PAIRS[repeat]
+        except (KeyError, TypeError):
+            raise BackendError(
+                f"macro type table slot {slot}: repeat must be 0/1/2 "
+                f"(arrMacroType), got {repeat!r}."
+            ) from None
+        offset = slot * MACRO_TYPE_TABLE_BYTES_PER_SLOT
+        table[offset] = low_high[0]
+        table[offset + 1] = low_high[1]
+    return bytes(table)
+
 
 def locate_codes_table(response: bytes | bytearray) -> int:
     """Offset of the 120-byte codes table inside a GET config-mirror response.
@@ -895,6 +1020,74 @@ class StockGmmkProBackend(BaseBackend):
         return (
             f"Restored the factory default keymap on profile {profile} layer {layer}; "
             "read-back verified against the full codes table."
+        )
+
+    # -- Macros (G19B: cmd 0x04 type table + cmd 0x05 macro data) -----------
+    #
+    # Byte-exact against G19B_PLAN.md (vendor MacroToData / arrMacroType).
+    # Like per-key RGB, these are WRITE-only pushes: the blank shadow mirror
+    # never reports macros back, so no GET-verify step exists here and the
+    # messages never claim readback. One send each, never retried.
+
+    def _build_macro_type_table_report(
+        self, profile: int, layer: int, assignments: dict[int, int]
+    ) -> bytearray:
+        """cmd 0x04 macro type table: [2]/[3] selectors, then 2 BE bytes per
+        slot at [8..247] (slot i at [8 + i*2]) from build_macro_type_table_bytes.
+
+        Selector PINS (plan): ``[2] = profile + 1``, ``[3] = layer + 1`` —
+        profile 2 / layer 3 lands 3 / 4 on the wire (the vendor macro-table
+        send indexes the config array 0-based; unlike cmd 0x03, whose 1-based
+        selectors go out unchanged, this buffer carries index+1).
+        """
+        table = build_macro_type_table_bytes(assignments)
+        report = bytearray(MACRO_REPORT_LENGTH)  # 264-byte standalone buffer
+        report[0] = self.REPORT_ID
+        report[1] = CMD_MACRO_TYPE_TABLE
+        report[2] = self._selector(profile, "profile") + 1
+        report[3] = self._selector(layer, "layer") + 1
+        report[
+            MACRO_REPORT_PAYLOAD_OFFSET : MACRO_REPORT_PAYLOAD_OFFSET + len(table)
+        ] = table
+        return report
+
+    def _build_macro_data_report(self, macro_id: int, events: list[dict]) -> bytearray:
+        """cmd 0x05 macro data: [2]=MacroID (int), event stream at [8..],
+        everything after the stream stays ZERO (the vendor end marker)."""
+        if not isinstance(macro_id, int) or isinstance(macro_id, bool) or not 0 <= macro_id <= MACRO_ID_MAX:
+            raise BackendError(
+                f"MacroID must be an int 0..{MACRO_ID_MAX} (M1..M{MACRO_ID_MAX + 1}), "
+                f"got {macro_id!r}."
+            )
+        stream = build_macro_events_bytes(events)
+        report = bytearray(MACRO_REPORT_LENGTH)  # 264-byte standalone buffer
+        report[0] = self.REPORT_ID
+        report[1] = CMD_MACRO_DATA
+        report[2] = macro_id
+        report[MACRO_REPORT_PAYLOAD_OFFSET : MACRO_REPORT_PAYLOAD_OFFSET + len(stream)] = stream
+        return report
+
+    def write_macro_type_table(self, profile: int, layer: int, assignments: dict[int, int]) -> str:
+        """Send the macro type table (cmd 0x04) once. Callers must skip this
+        send when NOTHING is macro-assigned (vendor behavior, plan-pinned)."""
+        if not self.hidraw:
+            raise BackendError(self.install_hint())
+        report = self._build_macro_type_table_report(profile, layer, assignments)
+        self._send_feature_report(report)
+        return (
+            f"Sent the macro type table for profile {profile} layer {layer} "
+            f"({len(assignments)} assigned slot(s), cmd 4)."
+        )
+
+    def write_macro_data(self, macro_id: int, events: list[dict]) -> str:
+        """Send one macro's byte stream (cmd 0x05) once."""
+        if not self.hidraw:
+            raise BackendError(self.install_hint())
+        report = self._build_macro_data_report(macro_id, events)
+        self._send_feature_report(report)
+        return (
+            f"Sent macro M{macro_id + 1} ({len(events)} step(s), cmd 5) — "
+            "stored on this computer; this keyboard cannot report macros back."
         )
 
     def change_profile(self, profile: int, layer: int) -> str:

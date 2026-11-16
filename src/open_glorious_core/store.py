@@ -17,7 +17,8 @@ document "corrupt"):
                <layer 1..3>: {
                  "settings": {brightness, speed, effect, color_name,
                               polling_rate, input_latency_ms, side_lights,
-                              win_lock, per_key},
+                              win_lock, per_key,
+                              macros, macro_slots},
                  "keymap":   {<slot 0..119>: <code 0..255>}   # partial OK
                }}}}}}}
 
@@ -66,6 +67,11 @@ SETTING_KEYS = frozenset(
         # readback (blank-shadow cmd-129 mirror).
         "win_lock",
         "per_key",
+        # G19B: the macro library + slot assignments. Same story: the macro
+        # store is the SOURCE OF TRUTH — this board cannot report macros
+        # back (blank mirror; Windows CORE treats it identically).
+        "macros",
+        "macro_slots",
     }
 )
 
@@ -73,6 +79,32 @@ SETTING_KEYS = frozenset(
 PER_KEY_VIS = frozenset({"off", "lit", "breath"})
 PER_KEY_SLOTS = 120
 PER_KEY_BLOCK_KEYS = frozenset({"enabled", "brightness", "slots"})
+
+# G19B macros (G19B_PLAN.md — Glorious CORE 2.1.22 ground truth). Stored per
+# profile/layer in the SAME settings block as the G19A keys, chosen because it
+# disturbs the staged-apply machinery least: `keymap` stays a pure slot->code
+# map, and the matrix overlay (type 0x05, code = MacroID) is computed at
+# apply/display time from these two blocks:
+#
+#   "macros":      {"<0..9>": {"name": str <=24 printable, "repeat": 0|1|2,
+#                              "events": [{"down": bool, "code": 0..0xFE,
+#                                          "delay": 1..65535}, ... 1..82]}}
+#   "macro_slots": {"<slot 0..119>": <MacroID 0..9>}
+#
+# MacroID 0..9 shows in the UI as M1..M10. Delay ZERO is REJECTED here at the
+# boundary (the vendor CLAMPS zero/negative deltas to 1 — we refuse to
+# silently rewrite the operator's timing; the encoder rejects too).
+# `code` is validated STRUCTURALLY here (0..0xFE — 0xFF "unassigned" is never
+# a macro key); catalog membership is the API layer's job (app.py/keycodes).
+MACRO_ID_RANGE = range(0, 10)
+MACRO_REPEAT_TYPES = (0, 1, 2)  # 0 No Repeat, 1 Repeat While Holding, 2 Toggle
+MACRO_NAME_MAX = 24
+MACRO_EVENT_MIN = 1
+MACRO_EVENT_MAX = 82  # 248-byte cmd-0x05 payload // 3-byte events
+MACRO_DELAY_MIN = 1
+MACRO_DELAY_MAX = 0xFFFF
+MACRO_EVENT_KEYS = frozenset({"down", "code", "delay"})
+MACRO_BLOCK_KEYS = frozenset({"name", "repeat", "events"})
 
 
 class StoreError(ValueError):
@@ -164,6 +196,114 @@ def validate_per_key(value: Any) -> dict[str, Any]:
     return out
 
 
+def validate_macro_event(value: Any, where: str) -> dict[str, Any]:
+    """One macro step: {"down": bool, "code": 0..0xFE, "delay": 1..65535}.
+
+    Delay ZERO is rejected (the store keeps the operator's authored timing
+    exactly; the wire encoder rejects it too — see backend
+    build_macro_events_bytes for the vendor's clamp-to-1 note). Code 0xFF
+    ("unassigned") is not a key a macro can press.
+    """
+    if not isinstance(value, dict):
+        raise StoreError(f"{where} must be an object with 'down', 'code', 'delay'")
+    unknown = set(value) - MACRO_EVENT_KEYS
+    if unknown:
+        raise StoreError(f"{where} has unknown keys: {sorted(unknown)}")
+    missing = MACRO_EVENT_KEYS - set(value)
+    if missing:
+        raise StoreError(f"{where} is missing keys: {sorted(missing)}")
+    down = value["down"]
+    if not isinstance(down, bool):
+        raise StoreError(f"{where} down must be a boolean, got {down!r}")
+    return {
+        "down": down,
+        "code": _plain_int(value["code"], 0x00, 0xFE, f"{where} code"),
+        "delay": _plain_int(
+            value["delay"], MACRO_DELAY_MIN, MACRO_DELAY_MAX, f"{where} delay"
+        ),
+    }
+
+
+def validate_macro(value: Any, where: str) -> dict[str, Any]:
+    """One macro: {"name": <=24 printable, "repeat": 0|1|2, "events": 1..82}.
+
+    An EMPTY events list is rejected: a macro with no steps has nothing to
+    send (the API deletes instead of emptying). Name keeps inner spaces but
+    must be printable and fits the vendor's 24-char cap.
+    """
+    if not isinstance(value, dict):
+        raise StoreError(f"{where} must be an object with 'name', 'repeat', 'events'")
+    unknown = set(value) - MACRO_BLOCK_KEYS
+    if unknown:
+        raise StoreError(f"{where} has unknown keys: {sorted(unknown)}")
+    missing = MACRO_BLOCK_KEYS - set(value)
+    if missing:
+        raise StoreError(f"{where} is missing keys: {sorted(missing)}")
+    name = value["name"]
+    if not isinstance(name, str) or not 1 <= len(name) <= MACRO_NAME_MAX:
+        raise StoreError(
+            f"{where} name must be 1..{MACRO_NAME_MAX} chars, got {name!r}"
+        )
+    if not name.isprintable() or name != name.strip():
+        raise StoreError(f"{where} name must be printable without edge spaces")
+    repeat = _plain_int(value["repeat"], 0, 2, f"{where} repeat")
+    if repeat not in MACRO_REPEAT_TYPES:  # belt-and-braces; range already covers
+        raise StoreError(f"{where} repeat must be one of {list(MACRO_REPEAT_TYPES)}")
+    events = value["events"]
+    if not isinstance(events, (list, tuple)):
+        raise StoreError(f"{where} events must be a list of steps")
+    if not MACRO_EVENT_MIN <= len(events) <= MACRO_EVENT_MAX:
+        raise StoreError(
+            f"{where} events must hold {MACRO_EVENT_MIN}..{MACRO_EVENT_MAX} steps, "
+            f"got {len(events)}"
+        )
+    return {
+        "name": name,
+        "repeat": repeat,
+        "events": [
+            validate_macro_event(event, f"{where} event {index}")
+            for index, event in enumerate(events)
+        ],
+    }
+
+
+def validate_macros(value: Any) -> dict[str, Any]:
+    """The macro library: {"<MacroID 0..9>": macro} — see module header."""
+    if not isinstance(value, dict):
+        raise StoreError("macros must be an object of MacroID -> macro")
+    out: dict[str, Any] = {}
+    for id_key, macro in value.items():
+        if not isinstance(id_key, str) or not id_key.isdigit():
+            raise StoreError(
+                f"macros keys must be integers 0..{MACRO_ID_RANGE.stop - 1}, "
+                f"got {id_key!r}"
+            )
+        macro_id = _plain_int(
+            int(id_key), MACRO_ID_RANGE.start, MACRO_ID_RANGE.stop - 1, "MacroID"
+        )
+        out[str(macro_id)] = validate_macro(macro, f"macro {macro_id}")
+    return out
+
+
+def validate_macro_slots(value: Any) -> dict[str, int]:
+    """Macro assignments: {slot 0..119 -> MacroID 0..9} — see module header."""
+    if not isinstance(value, dict):
+        raise StoreError("macro_slots must be an object of slot -> MacroID")
+    out: dict[str, int] = {}
+    for slot_key, macro_id in value.items():
+        if not isinstance(slot_key, str) or not slot_key.isdigit():
+            raise StoreError(
+                f"macro_slots keys must be integers 0..{KEYMAP_SLOTS - 1}, "
+                f"got {slot_key!r}"
+            )
+        slot = _plain_int(int(slot_key), 0, KEYMAP_SLOTS - 1, "macro slot")
+        out[str(slot)] = _plain_int(
+            macro_id, MACRO_ID_RANGE.start, MACRO_ID_RANGE.stop - 1,
+            f"macro slot {slot} MacroID",
+        )
+    return out
+
+
 def validate_settings(value: Any) -> dict[str, Any]:
     """Validate a settings block; raises StoreError on anything invalid."""
     if not isinstance(value, dict):
@@ -205,7 +345,34 @@ def validate_settings(value: Any) -> dict[str, Any]:
         out["win_lock"] = locked
     if "per_key" in value:
         out["per_key"] = validate_per_key(value["per_key"])
+    if "macros" in value:
+        out["macros"] = validate_macros(value["macros"])
+    if "macro_slots" in value:
+        out["macro_slots"] = validate_macro_slots(value["macro_slots"])
+    if "macros" in out and "macro_slots" in out:
+        # Both blocks in ONE settings payload: an assignment pointing at an
+        # absent macro is a dangling 0x05 cell the apply stage could never
+        # encode — reject. (Merged writes carry one block only; the API
+        # controller re-checks the PAIR against the stored library there.)
+        validate_macro_pair(out["macros"], out["macro_slots"])
     return out
+
+
+def validate_macro_pair(macros: Any, macro_slots: Any) -> tuple[dict, dict]:
+    """Cross-check assignments against the library; returns both validated.
+
+    Used by the API layer (and import) where the FULL post-merge state is in
+    hand: `macro_slots` may only reference MacroIDs that have stored content.
+    """
+    library = validate_macros(macros)
+    slots = validate_macro_slots(macro_slots)
+    for slot, macro_id in sorted(slots.items(), key=lambda item: int(item[0])):
+        if str(macro_id) not in library:
+            raise StoreError(
+                f"slot {slot} references MacroID {macro_id} "
+                f"(M{macro_id + 1}) with no stored macro content"
+            )
+    return library, slots
 
 
 def validate_keymap(value: Any) -> dict[str, int]:

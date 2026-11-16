@@ -49,10 +49,21 @@ HOST = "127.0.0.1"
 # did nothing; the manual recovery write with types[58]=0x01 landed — the
 # types overlay mechanism, E2E-pinned; the caps→NumpadDivide cell of that
 # incident is slot 60 per the G13 sweep, G17).
-KEYMAP_TYPE_LABELS = {0x01: "normal", 0x02: "modifier", 0x03: "consumer", 0xFF: "unused"}
+KEYMAP_TYPE_LABELS = {
+    0x01: "normal",
+    0x02: "modifier",
+    0x03: "consumer",
+    # G19B: macro cells (remap/PROTOCOL_DECODE.md type mask: "0x05 Macro
+    # (code = macro ID)").
+    0x05: "macro",
+    0xFF: "unused",
+}
 KEYMAP_TYPE_NORMAL = 0x01
 KEYMAP_TYPE_MODIFIER = 0x02
 KEYMAP_TYPE_CONSUMER = 0x03
+# G19B: a slot assigned a macro is typed 0x05 and its CODE byte carries the
+# MacroID (0..9) at WIRE time only — the store keeps the user's raw code.
+KEYMAP_TYPE_MACRO = 0x05
 # Types a write must never overwrite: the normal keys, the vendor modifier
 # set (0x02) and the knob/mute consumer typing (0x03) — G15 fix spec rule 3.
 KEYMAP_TYPES_PROTECTED = frozenset(
@@ -62,7 +73,11 @@ KEYMAP_TYPES_PROTECTED = frozenset(
 KEYMAP_MODIFIER_CODE_RANGE = (0xE0, 0xE7)
 
 
-def build_effective_types(codes: bytes, default_types: bytes) -> bytes:
+def build_effective_types(
+    codes: bytes,
+    default_types: bytes,
+    macro_slots: dict[str, int] | None = None,
+) -> bytes:
     """G15 fix spec 1: the per-key TYPE bytes that make the firmware activate
     the cells in ``codes``.
 
@@ -78,7 +93,14 @@ def build_effective_types(codes: bytes, default_types: bytes) -> bytes:
       vendor modifier typing;
     * an unassigned slot (code 0xFF) keeps the vendor type byte.
 
-    Pure function: no IO, no device (headless-testable, E2E-pinned).
+    G19B: ``macro_slots`` (store shape: {"<slot>": MacroID}) types those
+    cells 0x05 (macro). The macro rule runs LAST and UNCONDITIONALLY — a
+    macro assignment outranks even a protected vendor type (vendor evidence:
+    a macro cell is 0x05 whatever the factory typing of that cell was).
+
+    Pure function: no IO, no device (headless-testable, E2E-pinned). Without
+    ``macro_slots`` the result is byte-identical to the pre-G19B function
+    (hard rule 3: zero-macro writes are the old writes).
     """
     effective = bytearray(default_types)
     for slot, code in enumerate(codes[: len(default_types)]):
@@ -91,7 +113,28 @@ def build_effective_types(codes: bytes, default_types: bytes) -> bytes:
             if KEYMAP_MODIFIER_CODE_RANGE[0] <= code <= KEYMAP_MODIFIER_CODE_RANGE[1]
             else KEYMAP_TYPE_NORMAL
         )
+    for slot_key, macro_id in (macro_slots or {}).items():
+        slot = int(slot_key)
+        if 0 <= slot < len(effective):
+            effective[slot] = KEYMAP_TYPE_MACRO
     return bytes(effective)
+
+
+def build_macro_wire_codes(codes: bytes, macro_slots: dict[str, int]) -> bytes:
+    """G19B: the cmd-0x03 CODE bytes for a matrix that contains macro cells.
+
+    The store/last-good keep the USER's raw code per slot; at wire time a
+    macro cell's code byte is the MacroID (0x05 type says "interpret this
+    byte as a macro index", PROTOCOL_DECODE.md type mask). Everything else
+    rides unchanged, so a matrix without macro cells produces byte-identical
+    output (hard rule 3).
+    """
+    out = bytearray(codes)
+    for slot_key, macro_id in (macro_slots or {}).items():
+        slot = int(slot_key)
+        if 0 <= slot < len(out):
+            out[slot] = int(macro_id)
+    return bytes(out)
 KEYMAP_PROFILES = (1, 2, 3)
 KEYMAP_LAYERS = (1, 2, 3)
 # Exact banner text the UI must show when the mirror is the blank shadow
@@ -172,6 +215,19 @@ SETTINGS_POST_ROUTES = {
     "/api/per-key/color": "set_per_key_color",
     "/api/per-key/clear": "set_per_key_clear",
 }
+# G19B: dedicated MACRO routes. Same contract as SETTINGS_POST_ROUTES two
+# ways: the JSON body is the payload dict and validation errors answer 400 —
+# and NONE of them writes the device. The macro library/assignments live in
+# the local store (the board has no readback); cmd 0x04/0x05 go out with the
+# next Apply only.
+MACRO_POST_ROUTES = frozenset(
+    {
+        "/api/macro/save",
+        "/api/macro/delete",
+        "/api/macro/assign",
+        "/api/macro/unassign-slots-of",
+    }
+)
 # G16 (plan item 3): after EVERY successful apply-keymap/reset-keymap the
 # drawer banner states which profile/layer was written and how the operator
 # resolves a profile drift himself. The GUI's profile/layer is a software
@@ -712,7 +768,7 @@ class OpenGloriousCoreWebController:
         self._backend_io(_revert)
 
     def _bind_first_matrix_write(
-        self, label: str, profile: int, layer: int, write
+        self, label: str, profile: int, layer: int, write, after=None
     ) -> str:
         """G16: bind the target profile/layer (cmd 0x01) IMMEDIATELY BEFORE
         one matrix write (cmd 0x03) — mirrors the proven recovery recipe
@@ -732,6 +788,12 @@ class OpenGloriousCoreWebController:
         do with FN+CTRL+↑ anyway. A blank mirror can never confirm a bind
         (G8), so a failed bind verification is logged and the healing write
         proceeds: one bind + exactly ONE cmd 0x03, no blind retries.
+
+        G19B: the optional ``after`` callback runs immediately after the
+        matrix write, under the SAME io lock — the macro stage (cmd 0x04 /
+        0x05, plan apply order bind → 0x03 → 0x04 → 0x05) never interleaves
+        with other device IO. With ``after=None`` (every pre-G19B caller) the
+        emitted report sequence is exactly what it was.
         """
         self._log_line(
             f"{label}: bind ({profile},{layer}) -> matrix {KEYMAP_SLOTS} slots"
@@ -743,7 +805,10 @@ class OpenGloriousCoreWebController:
                 f"{label}: profile {profile} layer {layer} bind unverified "
                 f"({exc}) — continuing with the matrix write"
             )
-        return write()  # exactly one cmd 0x03 KeyMatrix
+        message = write()  # exactly one cmd 0x03 KeyMatrix
+        if after is not None:
+            after(profile, layer)  # G19B macro stage (same lock, after 0x03)
+        return message
 
     def verify_view(self) -> dict[str, Any]:
         """Snapshot of the verify-armed state for the UI (and tests)."""
@@ -762,6 +827,16 @@ class OpenGloriousCoreWebController:
     def get_state(self) -> dict[str, Any]:
         devices = detect_gmmk_pro()
         grouped_devices = _group_devices(devices)
+        # G19B: the macro library + assignments ride EVERY /api/state payload
+        # (top-level, next to "devices"). THE STORE IS THE TRUTH: the board
+        # cannot report macros back (blank GET shadow, live evidence
+        # 2026-11-15 — Windows CORE is in the same boat), so these values are
+        # what THIS COMPUTER has saved for the active profile/layer, never a
+        # device readback. Empty dicts when nothing is stored / no device.
+        macros, macro_slots = self._macro_store_view(
+            int(getattr(self.backend, "profile", 1)),
+            int(getattr(self.backend, "layer", 1)),
+        )
         if not devices:
             return {
                 "ok": False,
@@ -769,6 +844,8 @@ class OpenGloriousCoreWebController:
                 "backend": self.backend.name,
                 "devices": [],
                 "state": None,
+                "macros": macros,
+                "macro_slots": macro_slots,
             }
 
         if not self.backend.is_available():
@@ -778,6 +855,8 @@ class OpenGloriousCoreWebController:
                 "backend": self.backend.name,
                 "devices": grouped_devices,
                 "state": None,
+                "macros": macros,
+                "macro_slots": macro_slots,
             }
 
         try:
@@ -789,6 +868,8 @@ class OpenGloriousCoreWebController:
                 "backend": self.backend.name,
                 "devices": grouped_devices,
                 "state": None,
+                "macros": macros,
+                "macro_slots": macro_slots,
             }
 
         selected = grouped_devices[0]
@@ -798,6 +879,8 @@ class OpenGloriousCoreWebController:
             "message": f"Connected to {selected['name']} across {hidraws} using {self.backend.name}.",
             "backend": self.backend.name,
             "devices": grouped_devices,
+            "macros": macros,
+            "macro_slots": macro_slots,
             "state": {
                 "brightness": state.brightness,
                 "effect": state.effect,
@@ -934,8 +1017,14 @@ class OpenGloriousCoreWebController:
         # type_name + cell_active give the UI the label and the "cell active"
         # boolean directly.
         display_codes = list(codes)
+        # G19B: the macro assignments stored for this pair overlay the
+        # display exactly the way apply overlays the wire: assigned cells
+        # read as type 0x05 "macro" (the store is the truth — the board
+        # cannot report macros back). The cell's own stored code stays
+        # visible underneath; macro_label gives the UI its "M3"-style tag.
+        _, macro_slots = self._macro_store_view(profile, layer)
         display_types = (
-            build_effective_types(bytes(display_codes), types)
+            build_effective_types(bytes(display_codes), types, macro_slots)
             if types is not None
             else None
         )
@@ -948,6 +1037,7 @@ class OpenGloriousCoreWebController:
                 else None
             )
             type_label = KEYMAP_TYPE_LABELS.get(type_byte, "reserved")
+            macro_id = macro_slots.get(str(entry.slot))
             slots.append(
                 {
                     "slot": entry.slot,
@@ -958,6 +1048,9 @@ class OpenGloriousCoreWebController:
                     # G15 item 2: effective-type surface for the UI.
                     "type_name": type_label,
                     "cell_active": type_byte is not None and type_byte != 0xFF,
+                    # G19B: macro-cell surface (None when no macro here).
+                    "macro_id": macro_id,
+                    "macro_label": f"M{macro_id + 1}" if macro_id is not None else None,
                     "physical": KEYMAP_SLOT_LABELS.get(entry.slot),
                     "is_unassigned": code == KEYMAP_UNASSIGNED,
                     "factory_code": int(factory[entry.slot]),
@@ -1190,6 +1283,307 @@ class OpenGloriousCoreWebController:
             return None
         return store.get_layer(store.load(), serial, profile, layer)
 
+    # ------------------------------------------------------------------
+    # G19B: MACROS — store is the truth. The board has no macro readback
+    # (GET mirror is the blank shadow, live evidence 2026-11-15; Windows
+    # CORE keeps the same one-way model), so the local store IS the macro
+    # library. NOTHING in this block ever touches the device: macros reach
+    # the keyboard ONLY through the apply stage below (cmd 0x04 + 0x05),
+    # which the operator fires with Apply — the drawer footer says exactly
+    # that. Storage shape (least disturbance to the staged-apply machinery,
+    # see store.py header): macros + macro_slots ride the per-(device,
+    # profile, layer) `settings` block, SCHEMA_VERSION unchanged.
+    # ------------------------------------------------------------------
+
+    def _macro_store_view(self, profile: int, layer: int) -> tuple[dict, dict]:
+        """(macros, macro_slots) stored for one profile/layer pair."""
+        block = self._stored_layer(profile, layer)
+        settings = (block or {}).get("settings") or {}
+        macros = settings.get("macros")
+        slots = settings.get("macro_slots")
+        return (
+            dict(macros) if isinstance(macros, dict) else {},
+            {str(k): int(v) for k, v in slots.items()} if isinstance(slots, dict) else {},
+        )
+
+    def _macro_context(self) -> tuple[str, int, int, dict, dict] | None:
+        """Store context for macro edits: (serial, profile, layer, macros,
+        macro_slots) — None when no device is connected (the store is keyed
+        by the device serial, and macros belong to a profile on a board)."""
+        serial = self._device_serial()
+        if not serial:
+            return None
+        profile = int(getattr(self.backend, "profile", 1))
+        layer = int(getattr(self.backend, "layer", 1))
+        macros, macro_slots = self._macro_store_view(profile, layer)
+        return serial, profile, layer, macros, macro_slots
+
+    def _macro_stage(self, profile: int, layer: int) -> None:
+        """G19B apply stage — runs INSIDE the io lock right after the
+        bind-first matrix write (``_bind_first_matrix_write(after=...)``).
+
+        Plan apply order: bind (0x01) -> matrix (0x03) -> cmd 0x04 ONLY when
+        at least one key currently carries a macro (vendor: the type buffer
+        is not even built otherwise) -> ONE cmd 0x05 per stored macro in
+        MacroID order (every stored macro is non-empty — the API refuses
+        empty ones — and CORE re-pushes the whole library, assigned or not)
+        -> re-assert the profile bind (cmd 0x01) ONLY when macro reports
+        actually went out: a pair without macros must emit the exact HEAD
+        byte sequence (hard rule 3), and the re-assert exists because 0x04
+        carries its own profile/layer selectors — the board is left bound to
+        exactly the pair the banner names.
+
+        The re-assert rides the same blank-mirror caveat as the initial bind
+        (change_profile verifies via the GET mirror this board answers
+        blank): a failed verification is logged, never fatal.
+        """
+        macros, macro_slots = self._macro_store_view(profile, layer)
+        assignments: dict[int, int] = {}
+        for slot_key, macro_id in macro_slots.items():
+            macro = macros.get(str(macro_id))
+            if macro is not None:  # pair guard makes misses impossible
+                assignments[int(slot_key)] = int(macro["repeat"])
+        sent = 0
+        if assignments:
+            self._log_line(
+                f"macro stage: cmd 0x04 macro type table "
+                f"({len(assignments)} assigned slot(s))"
+            )
+            self.backend.write_macro_type_table(profile, layer, assignments)
+            sent += 1
+        for macro_id_key in sorted(macros, key=int):
+            # Store is the truth: content was validated on save, there is no
+            # readback to compare against afterwards.
+            self.backend.write_macro_data(
+                int(macro_id_key), macros[macro_id_key]["events"]
+            )
+            sent += 1
+        if not sent:
+            return
+        self._log_line(
+            f"macro stage: {sent} macro report(s) sent — macros live on "
+            "this computer, the board cannot report them back"
+        )
+        try:
+            self.backend.change_profile(profile, layer)
+        except BackendError as exc:
+            self._log_line(f"macro stage: profile re-assert unverified ({exc})")
+
+    def _store_clear_macro_slots(self, profile: int, layer: int) -> None:
+        """Factory-reset companion: clearing the keymap ALSO clears every
+        MACRO ASSIGNMENT (the cells revert to the factory table on the
+        wire). The macro LIBRARY (macros content) stays — macros are deleted
+        only on purpose, via the drawer / api/macro/delete."""
+        serial = self._device_serial()
+        if not serial:
+            return
+        block = self._stored_layer(profile, layer) or {}
+        if "macro_slots" not in (block.get("settings") or {}):
+            return
+        try:
+            store.record(serial, profile, layer, settings={"macro_slots": {}})
+        except (store.StoreError, OSError) as exc:
+            self._log_line(f"store macro assignment clear failed: {exc}")
+
+    @staticmethod
+    def _macro_id_or_error(value: Any) -> int | str:
+        """MacroID validation shared by the four macro routes: int 0..9 or
+        an error string (routes answer 400)."""
+        if not isinstance(value, int) or isinstance(value, bool):
+            return "id must be an integer MacroID (0..9)."
+        if value not in store.MACRO_ID_RANGE:
+            return "id must be between 0 and 9 (macro keys M1..M10)."
+        return value
+
+    def _macro_event_error(self, event: Any, where: str) -> str | None:
+        """Structural check (store validator) + the keycodes CATALOG check
+        the store deliberately leaves to the API (import-free module rule):
+        every macro event code must be a key this board can carry."""
+        try:
+            store.validate_macro_event(event, where)
+        except store.StoreError as exc:
+            return f"Macro save rejected: {exc}"
+        catalog = set(all_assignable_codes())
+        if isinstance(event, dict) and event.get("code") not in catalog:
+            return (
+                f"Macro save rejected: event code {event.get('code')!r} is not "
+                "a key in the keymap catalog."
+            )
+        return None
+
+    def macro_save(self, payload: Any) -> dict[str, Any]:
+        """POST /api/macro/save {id, name, repeat, events} — store write
+        ONLY (the device learns about it at the next Apply)."""
+        ctx = self._macro_context()
+        if ctx is None:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        serial, profile, layer, macros, macro_slots = ctx
+        if not isinstance(payload, dict):
+            return {"ok": False, "message": "Macro payload must be a JSON object."}
+        macro_id = self._macro_id_or_error(payload.get("id"))
+        if isinstance(macro_id, str):
+            return {"ok": False, "message": macro_id}
+        events = payload.get("events")
+        if not isinstance(events, list):
+            return {"ok": False, "message": "events must be a list of steps."}
+        for index, event in enumerate(events):
+            error = self._macro_event_error(event, f"macro {macro_id} event {index}")
+            if error:
+                return {"ok": False, "message": error}
+        try:
+            macro = store.validate_macro(
+                {
+                    "name": payload.get("name"),
+                    "repeat": payload.get("repeat"),
+                    "events": events,
+                },
+                f"macro {macro_id}",
+            )
+            macros_out = dict(macros)
+            macros_out[str(macro_id)] = macro
+            store.validate_macro_pair(macros_out, macro_slots)
+            store.record(
+                serial, profile, layer, settings={"macros": macros_out}
+            )
+        except (store.StoreError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": f"Macro save rejected: {exc}"}
+        saved, slots = self._macro_store_view(profile, layer)
+        return {
+            "ok": True,
+            "message": (
+                f"Saved M{macro_id + 1} ({len(macro['events'])} step(s)) on "
+                "this computer — press Apply to write it to the board."
+            ),
+            "macros": saved,
+            "macro_slots": slots,
+        }
+
+    def macro_delete(self, payload: Any) -> dict[str, Any]:
+        """POST /api/macro/delete {id} — removing a macro ALSO clears every
+        cell that assigns it (plan: no dangling references, cells revert to
+        their stored key on the next Apply). Store-only."""
+        ctx = self._macro_context()
+        if ctx is None:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        serial, profile, layer, macros, macro_slots = ctx
+        macro_id = self._macro_id_or_error(
+            payload.get("id") if isinstance(payload, dict) else None
+        )
+        if isinstance(macro_id, str):
+            return {"ok": False, "message": macro_id}
+        if str(macro_id) not in macros:
+            return {"ok": False, "message": f"There is no stored macro M{macro_id + 1}."}
+        macros_out = {key: value for key, value in macros.items() if key != str(macro_id)}
+        slots_out = {
+            slot: value
+            for slot, value in macro_slots.items()
+            if value != macro_id
+        }
+        cleared = len(macro_slots) - len(slots_out)
+        try:
+            store.record(
+                serial,
+                profile,
+                layer,
+                settings={"macros": macros_out, "macro_slots": slots_out},
+            )
+        except (store.StoreError, OSError) as exc:
+            return {"ok": False, "message": f"Macro delete rejected: {exc}"}
+        saved, slots = self._macro_store_view(profile, layer)
+        note = (
+            f" ({cleared} key assignment(s) cleared)"
+            if cleared
+            else ""
+        )
+        return {
+            "ok": True,
+            "message": f"Deleted M{macro_id + 1} from this computer{note}.",
+            "macros": saved,
+            "macro_slots": slots,
+        }
+
+    def macro_assign(self, payload: Any) -> dict[str, Any]:
+        """POST /api/macro/assign {slot, id|null} — bind a key (slot 0..119)
+        to a macro, or pass id=null to clear the assignment. The slot's own
+        stored key code STAYS (unassigning reverts the cell through the
+        existing default-table display logic); only the WIRE bytes change at
+        Apply (type 0x05, code = MacroID). Store-only."""
+        ctx = self._macro_context()
+        if ctx is None:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        serial, profile, layer, macros, macro_slots = ctx
+        if not isinstance(payload, dict):
+            return {"ok": False, "message": "Macro assignment payload must be a JSON object."}
+        slot = payload.get("slot")
+        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot < KEYMAP_SLOTS:
+            return {"ok": False, "message": f"slot must be an integer 0..{KEYMAP_SLOTS - 1}."}
+        macro_id = payload.get("id")
+        slots_out = dict(macro_slots)
+        if macro_id is None:
+            slots_out.pop(str(slot), None)
+            verb = f"slot {slot} no longer carries a macro"
+        else:
+            checked = self._macro_id_or_error(macro_id)
+            if isinstance(checked, str):
+                return {"ok": False, "message": checked}
+            if str(checked) not in macros:
+                return {
+                    "ok": False,
+                    "message": (
+                        f"M{checked + 1} has no stored macro content — save it "
+                        "in the Macro Editor first."
+                    ),
+                }
+            slots_out[str(slot)] = checked
+            verb = f"slot {slot} now carries M{checked + 1}"
+        try:
+            store.validate_macro_pair(macros, slots_out)
+            store.record(serial, profile, layer, settings={"macro_slots": slots_out})
+        except (store.StoreError, TypeError, ValueError) as exc:
+            return {"ok": False, "message": f"Macro assignment rejected: {exc}"}
+        saved, slots = self._macro_store_view(profile, layer)
+        return {
+            "ok": True,
+            "message": f"{verb} on this computer — press Apply to write it to the board.",
+            "macros": saved,
+            "macro_slots": slots,
+        }
+
+    def macro_unassign_slots_of(self, payload: Any) -> dict[str, Any]:
+        """POST /api/macro/unassign-slots-of {id} — clear EVERY cell that
+        assigns this macro (the companion the UI calls before a delete;
+        /api/macro/delete also does it inline). Store-only."""
+        ctx = self._macro_context()
+        if ctx is None:
+            return {"ok": False, "message": "No GMMK Pro detected in /sys/class/hidraw."}
+        serial, profile, layer, macros, macro_slots = ctx
+        macro_id = self._macro_id_or_error(
+            payload.get("id") if isinstance(payload, dict) else None
+        )
+        if isinstance(macro_id, str):
+            return {"ok": False, "message": macro_id}
+        slots_out = {
+            slot: value
+            for slot, value in macro_slots.items()
+            if value != macro_id
+        }
+        cleared = len(macro_slots) - len(slots_out)
+        try:
+            store.record(serial, profile, layer, settings={"macro_slots": slots_out})
+        except (store.StoreError, OSError) as exc:
+            return {"ok": False, "message": f"Macro unassign rejected: {exc}"}
+        saved, slots = self._macro_store_view(profile, layer)
+        return {
+            "ok": True,
+            "message": (
+                f"Cleared {cleared} key assignment(s) of M{macro_id + 1} — "
+                "press Apply to write the reverted cells to the board."
+            ),
+            "macros": saved,
+            "macro_slots": slots,
+        }
+
+
     def export_profile(self, profile: Any = None, layer: Any = None) -> dict[str, Any]:
         """The stored profile/layer as an export document (local file only)."""
         try:
@@ -1296,9 +1690,9 @@ class OpenGloriousCoreWebController:
                     "ok": False,
                     "message": "Import rejected: no keymap/settings block and no devices document.",
                 }
+            catalog = set(all_assignable_codes())
             keymap_valid = store.validate_keymap(keymap_in) if keymap_in is not None else None
             if keymap_valid is not None:
-                catalog = set(all_assignable_codes())
                 for slot_key, code in keymap_valid.items():
                     if code not in catalog:
                         return {
@@ -1311,6 +1705,25 @@ class OpenGloriousCoreWebController:
             settings_valid = (
                 store.validate_settings(settings_in) if settings_in is not None else None
             )
+            if settings_valid is not None:
+                # G19B: macros ride the settings validation (shape, 1..82
+                # steps, delay 1..65535, repeat 0..2, name, the slot/library
+                # pair guard). The catalog membership check — a MACRO EVENT
+                # code must be a key this board can carry — is API-side, the
+                # same split as /api/macro/save. Bad import => 400 answer and
+                # the store stays UNTOUCHED (nothing is recorded until every
+                # check below has passed).
+                for macro_key, macro in (settings_valid.get("macros") or {}).items():
+                    for index, event in enumerate(macro["events"]):
+                        if event["code"] not in catalog:
+                            return {
+                                "ok": False,
+                                "message": (
+                                    f"Import rejected: macro {macro_key} (M{int(macro_key) + 1}) "
+                                    f"event {index} code 0x{event['code']:02X} is not an "
+                                    "assignable key."
+                                ),
+                            }
             if keymap_valid is None and settings_valid is None:
                 return {"ok": False, "message": "Import rejected: nothing to import."}
             block = store.record(serial, profile, layer, keymap=keymap_valid, settings=settings_valid)
@@ -1418,6 +1831,13 @@ class OpenGloriousCoreWebController:
                 profile = int(getattr(self.backend, "profile", 1))
                 layer = int(getattr(self.backend, "layer", 1))
                 raw_bytes = bytes(raw)
+                # G19B: WIRE-time macro overlay. The store and last-good keep
+                # the RAW user codes (hard rule 2 territory); the cmd-0x03
+                # payload carries code=MacroID + type 0x05 at assigned slots.
+                # With no macro assignments wire_bytes == raw_bytes and the
+                # types call behaves exactly as before (hard rule 3).
+                _, macro_slots = self._macro_store_view(profile, layer)
+                wire_bytes = build_macro_wire_codes(raw_bytes, macro_slots)
                 # G15: the GUI payload carries CODES only; pairing them with
                 # the packaged vendor types verbatim leaves every assigned
                 # 0xFF-type slot INACTIVE — the firmware honors the type byte
@@ -1425,7 +1845,7 @@ class OpenGloriousCoreWebController:
                 # explicitly.
                 default_types = self._default_types()
                 effective_types = (
-                    build_effective_types(raw_bytes, default_types)
+                    build_effective_types(wire_bytes, default_types, macro_slots)
                     if default_types is not None
                     else None
                 )
@@ -1433,14 +1853,17 @@ class OpenGloriousCoreWebController:
                 # (cmd 0x03) — a profile-drifted GUI counter otherwise sends
                 # the matrix to a profile the operator is not typing on (the
                 # 13:07 NO CHANGE). One lock: bind+write are atomic.
+                # G19B: the macro stage (0x04/0x05 + re-assert, plan order)
+                # rides the same lock right after the matrix write.
                 message = self._backend_io(
                     self._bind_first_matrix_write,
                     "apply-keymap",
                     profile,
                     layer,
                     lambda: self.backend.set_keymap_codes(
-                        profile, layer, raw_bytes, effective_types
+                        profile, layer, wire_bytes, effective_types
                     ),
+                    self._macro_stage,
                 )
                 # G12 item 1: persist every applied matrix as last-good
                 # insurance. Runs OUTSIDE the io lock's backend call; the
@@ -1456,13 +1879,23 @@ class OpenGloriousCoreWebController:
             elif action == "reset-keymap":
                 profile = int(getattr(self.backend, "profile", 1))
                 layer = int(getattr(self.backend, "layer", 1))
+                # G19B docstring-level contract (plan): clearing the keymap
+                # ALSO clears every macro ASSIGNMENT for the pair — the
+                # cells revert to the factory table. The macro LIBRARY
+                # stays: macros are content on this computer and are deleted
+                # only explicitly (/api/macro/delete). Cleared BEFORE the
+                # write so the stage below cannot send a stale 0x04.
+                self._store_clear_macro_slots(profile, layer)
                 # G16: same bind-first rule for the factory-reset write.
+                # G19B: the stored library still rides out (one 0x05 per
+                # macro) — there are no assignments anymore, so no 0x04.
                 message = self._backend_io(
                     self._bind_first_matrix_write,
                     "reset-keymap",
                     profile,
                     layer,
                     lambda: self.backend.reset_keymap(profile, layer),
+                    self._macro_stage,
                 )
                 # The device now holds the factory table — the store must
                 # agree, or the blank-mirror fallback would resurrect old
@@ -1526,7 +1959,8 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent", "/api/import") \
-                and self.path not in SETTINGS_POST_ROUTES:
+                and self.path not in SETTINGS_POST_ROUTES \
+                and self.path not in MACRO_POST_ROUTES:
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -1556,6 +1990,20 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             # G18 commit 3: import validates + stages in the LOCAL store.
             # It physically cannot write the device (no backend call).
             result = self.controller.import_profile(payload)
+            self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
+            return
+
+        if self.path in MACRO_POST_ROUTES:
+            # G19B: macro library/assignment routes — local store writes
+            # only, validation errors answer 400, the device is never
+            # touched (macros reach the board with the next Apply).
+            handler = {
+                "/api/macro/save": self.controller.macro_save,
+                "/api/macro/delete": self.controller.macro_delete,
+                "/api/macro/assign": self.controller.macro_assign,
+                "/api/macro/unassign-slots-of": self.controller.macro_unassign_slots_of,
+            }[self.path]
+            result = handler(payload)
             self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
             return
 
