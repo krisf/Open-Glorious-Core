@@ -1172,3 +1172,90 @@ output {
 ::-webkit-scrollbar-corner {
     background: transparent;
 }
+
+/* ---------------------------------------------------------------------------
+   G19A commit 2: win-lock row (Performance), per-key colors subsection
+   (Lighting card) and the slot-target strip (color card). All built from the
+   existing tokens/classes — no new layout machinery, no horizontal scroll:
+   rows are flex-wrap, the strip wraps under narrow widths.
+--------------------------------------------------------------------------- */
+.toggle-text strong {
+    display: block;
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.86rem;
+}
+
+.toggle-text small {
+    display: block;
+    color: var(--muted);
+    font-size: 0.74rem;
+    margin-top: 2px;
+}
+
+.per-key-block {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.per-key-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.per-key-block .control-list {
+    padding-top: 4px;
+}
+
+.per-key-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 0 2px;
+}
+
+.per-key-hint {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.per-key-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(243, 154, 35, 0.35);
+    border-radius: var(--radius-md);
+    background: rgba(243, 154, 35, 0.06);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+
+.per-key-strip-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Saved per-key colors tint the cap's BOTTOM FACE only — a 2px inset bar,
+   never over the label (G18 no-truncation rules stay intact). */
+.keycap.has-perkey-color::after {
+    content: "";
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    bottom: 2px;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--perkey-tint, transparent);
+    pointer-events: none;
+}

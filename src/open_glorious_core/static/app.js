@@ -14,6 +14,15 @@ const state = {
   pollingRate: null,
   inputLatencyMs: null,
   sideLights: null,
+  // G19A: win-lock + per-key colors mirror of /api/state (null = backend
+  // predates G19A). The local store is the source of truth — this keyboard
+  // cannot report colors or the lock state back, so these values always
+  // reflect what THIS app saved, never a device read.
+  winLock: null,
+  perKey: null, // {enabled, brightness, slots} exactly as the store keeps it
+  perKeyEdit: false, // Edit mode switch: keycap clicks target the color panel
+  perKeySlot: null, // slot the shared picker is currently targeting
+  perKeyBusy: false, // bulk op (Reset all / Clear all) in flight
 };
 
 const els = {
@@ -49,6 +58,22 @@ const els = {
   pollingGroup: document.getElementById("polling-rate-group"),
   latencyGroup: document.getElementById("input-latency-group"),
   sideLightsToggle: document.getElementById("side-lights-toggle"),
+  // G19A: win-lock toggle + per-key colors subsection (Lighting card) +
+  // the slot-target strip inside the custom color card.
+  winLockToggle: document.getElementById("win-lock-toggle"),
+  perKeyEnable: document.getElementById("per-key-enable"),
+  perKeyChip: document.getElementById("per-key-chip"),
+  perKeyControls: document.getElementById("per-key-controls"),
+  perKeyBrightness: document.getElementById("per-key-brightness"),
+  perKeyBrightnessValue: document.getElementById("per-key-brightness-value"),
+  perKeyEditToggle: document.getElementById("per-key-edit-toggle"),
+  perKeyResetAll: document.getElementById("per-key-reset-all"),
+  perKeyClearAll: document.getElementById("per-key-clear-all"),
+  perKeyStrip: document.getElementById("per-key-strip"),
+  perKeyStripLabel: document.getElementById("per-key-strip-label"),
+  perKeyVisOff: document.getElementById("per-key-vis-off"),
+  perKeyVisBreath: document.getElementById("per-key-vis-breath"),
+  perKeyClearSlot: document.getElementById("per-key-clear-slot"),
 };
 
 function setText(el, value) {
@@ -204,6 +229,93 @@ function keycapFaceLabel(code, physical, capName) {
 }
 // [PURE-HEX-END]
 
+// [PURE-PERKEY-START]
+// G19A: the ONE canonical map of the three per-key visibility modes. Bytes
+// are NUMBERS taken straight from the vendor layout spec (see the map — it
+// is deliberately the only place the three byte literals appear). Nothing
+// here parses a radix, and perKeyVisLabel FORMATS the number via the shared
+// keycodeHex (G18 F1 lesson: formatting a STRING echoes its decimal text
+// verbatim — the hex labels must be produced from numbers).
+const PER_KEY_VIS_MODES = [
+  { name: "off", byte: 0x00, label: "OFF" },
+  { name: "lit", byte: 0xFF, label: "Lit" },
+  { name: "breath", byte: 0xFE, label: "Breathing" },
+];
+const PER_KEY_VIS_BYTES = PER_KEY_VIS_MODES.reduce((map, mode) => {
+  map[mode.name] = mode.byte;
+  return map;
+}, {});
+
+function perKeyVisByte(vis) {
+  const name = String(vis);
+  return Object.prototype.hasOwnProperty.call(PER_KEY_VIS_BYTES, name)
+    ? PER_KEY_VIS_BYTES[name]
+    : null;
+}
+
+// Hex label for the strip (e.g. "breath" renders as its FE byte, uppercase
+// hex string — formatted from the map's number, never parsed from a string).
+function perKeyVisLabel(vis) {
+  const byte = perKeyVisByte(vis);
+  return byte == null ? "—" : keycodeHex(byte);
+}
+
+function perKeyVisName(vis) {
+  const mode = PER_KEY_VIS_MODES.find((entry) => entry.name === String(vis));
+  return mode ? mode.label : "—";
+}
+
+// Dedicated settings routes (commit 1 wired them; exact pinned strings).
+const PER_KEY_ROUTES = {
+  winLock: "/api/win-lock",
+  enable: "/api/per-key/enable",
+  brightness: "/api/per-key/brightness",
+  color: "/api/per-key/color",
+  clear: "/api/per-key/clear",
+};
+
+function perKeyColoredCount(slots) {
+  if (!slots || typeof slots !== "object") return 0;
+  return Object.keys(slots).length;
+}
+
+function perKeyChipText(slots) {
+  return `${perKeyColoredCount(slots)} keys colored`;
+}
+
+// Keycap bottom-face tint: lit/breathing slots tint, OFF slots (and
+// malformed entries) do not. Returns the [r, g, b] triple or null — the
+// caller formats it with the shared rgbToHex.
+function perKeyTintRgb(perKey, slot) {
+  const slots = perKey && perKey.slots;
+  if (!perKey || !perKey.enabled || !slots) return null;
+  const entry = slots[String(slot)];
+  if (!entry || entry.vis === "off") return null;
+  const rgb = entry.rgb;
+  if (!Array.isArray(rgb) || rgb.length !== 3) return null;
+  if (rgb.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+    return null;
+  }
+  return rgb;
+}
+
+// Edit-mode gating (pinned semantics): a keycap click opens the color panel
+// ONLY while per-key mode is enabled AND Edit mode is on; in every other
+// combination the keycap click keeps its current remap-drawer behavior.
+// The two destinations are mutually exclusive — never both.
+function perKeyEditActive(enabled, editMode) {
+  return Boolean(enabled) && Boolean(editMode);
+}
+
+function perKeyClickOpensColorPanel(enabled, editMode) {
+  return perKeyEditActive(enabled, editMode);
+}
+
+function perKeyClickOpensDrawer(enabled, editMode) {
+  return !perKeyClickOpensColorPanel(enabled, editMode);
+}
+// [PURE-PERKEY-END]
+
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
 }
@@ -313,9 +425,27 @@ function syncCustomColorInputs(red, green, blue) {
 }
 
 let customColorTimer = null;
+
+// G19A: true while per-key Edit mode has a slot targeted — the shared
+// picker/RGB/hex machinery then writes that slot, not the effect color.
+function perKeyTargetActive() {
+  return (
+    perKeyEditActive(state.perKey && state.perKey.enabled, state.perKeyEdit)
+    && state.perKeySlot != null
+  );
+}
+
 function commitCustomColor() {
   if (customColorTimer) clearTimeout(customColorTimer);
   customColorTimer = setTimeout(() => {
+    if (perKeyTargetActive()) {
+      // Slot color: rgb only — the backend keeps the slot's vis mode.
+      postPerKey("color", {
+        slot: state.perKeySlot,
+        rgb: [state.customColor.red, state.customColor.green, state.customColor.blue],
+      });
+      return;
+    }
     sendAction("set_custom_color", {
       ...state.customColor,
       group: state.activeColorGroup,
@@ -447,7 +577,9 @@ function updateColorControls(activeEffect) {
   const groups = renderColorGroupTabs(activeEffect);
   const supportsColor = groups.length > 0;
 
-  toggleHidden(els.customColorLayout, !supportsColor);
+  // G19A: while a per-key slot is targeted the picker stays available even
+  // for palette-only effects — it colors the SLOT, not the effect.
+  toggleHidden(els.customColorLayout, !supportsColor && !perKeyTargetActive());
   toggleHidden(els.colorGridWrap, !supportsColor);
 
   if (!supportsColor) {
@@ -518,7 +650,13 @@ function applyPayload(payload) {
     if (els.brightness && els.brightnessValue) setText(els.brightnessValue, els.brightness.value);
     if (els.speed && els.speedValue) setText(els.speedValue, els.speed.value);
     if (payload.state.red != null && payload.state.green != null && payload.state.blue != null) {
-      syncCustomColorInputs(payload.state.red, payload.state.green, payload.state.blue);
+      if (perKeyTargetActive()) {
+        // G19A: while a per-key slot is targeted the picker shows the slot's
+        // SAVED color, never the global effect color.
+        syncPerKeyTargetInputs();
+      } else {
+        syncCustomColorInputs(payload.state.red, payload.state.green, payload.state.blue);
+      }
     }
     // G18 F6: recompute the active preset on EVERY state render.
     state.activeColorName = colorNameForRgb(
@@ -528,6 +666,10 @@ function applyPayload(payload) {
     if (payload.state.polling_rate != null) state.pollingRate = payload.state.polling_rate;
     if (payload.state.input_latency_ms != null) state.inputLatencyMs = payload.state.input_latency_ms;
     if (payload.state.side_lights != null) state.sideLights = Boolean(payload.state.side_lights);
+    // G19A: win-lock + per-key mirror. These are the values THIS app saved
+    // (the store is the source of truth) — this board has no readback.
+    if (payload.state.win_lock != null) state.winLock = Boolean(payload.state.win_lock);
+    if (payload.state.per_key) state.perKey = payload.state.per_key;
   } else {
     state.activeColorName = null;
   }
@@ -538,6 +680,9 @@ function applyPayload(payload) {
   renderEffects(activeEffect);
   renderPerformance();
   updateColorControls(activeEffect);
+  // G19A: win-lock toggle, per-key subsection, keycap tints + strip.
+  renderPerKeyPanel();
+  renderKeymapGrid();
 }
 
 function renderDevices(backendName) {
@@ -651,6 +796,130 @@ function renderPerformance() {
   if (els.sideLightsToggle && state.sideLights != null) {
     els.sideLightsToggle.checked = state.sideLights;
   }
+  // G19A: the win-lock toggle follows the saved flag (store value — there is
+  // no device readback for it on this board).
+  if (els.winLockToggle && state.winLock != null) {
+    els.winLockToggle.checked = state.winLock;
+  }
+}
+
+// --- G19A: per-key colors -----------------------------------------------------
+// The store holds every color; /api/state mirrors it. This keyboard cannot
+// report its colors back, so these renders are the UI's only truth — and the
+// wording in index.html never claims a device read.
+async function postPerKey(routeKey, value) {
+  const path = PER_KEY_ROUTES[routeKey];
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    const payload = await response.json();
+    // Bulk ops (Reset all / Clear all) suppress the per-op re-render; the
+    // final fetchState() renders everything once.
+    if (!state.perKeyBusy) applyPayload(payload);
+    return payload;
+  } catch (error) {
+    setText(els.statusMessage, `Request to ${path} failed: ${error}`);
+    setText(els.statusPill, "Error");
+    return { ok: false, message: String(error) };
+  }
+}
+
+function renderPerKeyPanel() {
+  const perKey = state.perKey;
+  if (!perKey) return;
+  if (els.perKeyEnable) els.perKeyEnable.checked = Boolean(perKey.enabled);
+  toggleHidden(els.perKeyControls, !perKey.enabled);
+  if (els.perKeyBrightness && document.activeElement !== els.perKeyBrightness) {
+    els.perKeyBrightness.value = String(perKey.brightness);
+  }
+  if (els.perKeyBrightnessValue) {
+    setText(els.perKeyBrightnessValue, String(perKey.brightness));
+  }
+  if (els.perKeyChip) setText(els.perKeyChip, perKeyChipText(perKey.slots));
+  if (els.perKeyEditToggle) {
+    els.perKeyEditToggle.checked = state.perKeyEdit;
+    els.perKeyEditToggle.disabled = !perKey.enabled;
+  }
+  if (els.perKeyResetAll) els.perKeyResetAll.disabled = state.perKeyBusy;
+  if (els.perKeyClearAll) els.perKeyClearAll.disabled = state.perKeyBusy;
+  renderPerKeyStrip();
+}
+
+function renderPerKeyStrip() {
+  if (!els.perKeyStrip) return;
+  const active = perKeyTargetActive();
+  toggleHidden(els.perKeyStrip, !active);
+  if (!active) {
+    // Leaving target mode must also drop the picker's slot-target ring state.
+    if (els.perKeyVisOff) els.perKeyVisOff.classList.remove("is-active");
+    if (els.perKeyVisBreath) els.perKeyVisBreath.classList.remove("is-active");
+    return;
+  }
+  const slots = (state.perKey && state.perKey.slots) || {};
+  const entry = slots[String(state.perKeySlot)];
+  const vis = entry ? entry.vis : "lit";
+  setText(
+    els.perKeyStripLabel,
+    entry
+      ? `Slot ${state.perKeySlot} · ${perKeyVisName(vis)} (${perKeyVisLabel(vis)})`
+      : `Slot ${state.perKeySlot} · no color saved yet — picking one stores it as Lit (${perKeyVisLabel("lit")})`,
+  );
+  if (els.perKeyVisOff) els.perKeyVisOff.classList.toggle("is-active", vis === "off");
+  if (els.perKeyVisBreath) els.perKeyVisBreath.classList.toggle("is-active", vis === "breath");
+}
+
+// Point the shared picker at the per-key slot's saved color.
+function syncPerKeyTargetInputs() {
+  const slots = (state.perKey && state.perKey.slots) || {};
+  const entry = slots[String(state.perKeySlot)];
+  if (entry && Array.isArray(entry.rgb) && entry.rgb.length === 3) {
+    syncCustomColorInputs(entry.rgb[0], entry.rgb[1], entry.rgb[2]);
+  }
+}
+
+function selectPerKeySlot(slot) {
+  state.perKeySlot = state.perKeySlot === slot ? null : slot;
+  renderKeymapGrid();
+  renderPerKeyStrip();
+  if (state.perKeySlot == null) return;
+  syncPerKeyTargetInputs();
+  updateColorControls(getActiveEffectId());
+  if (els.colorControlsSection && els.colorControlsSection.scrollIntoView) {
+    els.colorControlsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+async function writePerKeySlotVis(vis) {
+  if (!perKeyTargetActive()) return;
+  const slots = (state.perKey && state.perKey.slots) || {};
+  const entry = slots[String(state.perKeySlot)];
+  // "Set OFF" on an already-OFF slot toggles back to Lit (three modes, two
+  // chips, per the plan).
+  const nextVis = entry && entry.vis === vis ? "lit" : vis;
+  const rgb = entry && Array.isArray(entry.rgb) && entry.rgb.length === 3
+    ? entry.rgb
+    : [state.customColor.red, state.customColor.green, state.customColor.blue];
+  await postPerKey("color", { slot: state.perKeySlot, rgb, vis: nextVis });
+}
+
+// Bulk writes go slot by slot through the same /api/per-key routes (the API
+// has no batch verb on purpose); re-renders are suppressed until the end.
+async function runPerKeyBulk(ops) {
+  if (state.perKeyBusy) return;
+  state.perKeyBusy = true;
+  if (els.perKeyResetAll) els.perKeyResetAll.disabled = true;
+  if (els.perKeyClearAll) els.perKeyClearAll.disabled = true;
+  try {
+    for (const op of ops) {
+      await postPerKey(op.route, op.value);
+    }
+  } finally {
+    state.perKeyBusy = false;
+    await fetchState();
+  }
 }
 
 function renderEffects(activeEffect) {
@@ -706,6 +975,86 @@ if (els.latencyGroup) {
 if (els.sideLightsToggle) {
   els.sideLightsToggle.addEventListener("change", () => {
     sendAction("set_side_lights", els.sideLightsToggle.checked);
+  });
+}
+
+// G19A: win-lock + per-key actions. Every write goes to a dedicated route;
+// none of them touches the device — the store persists, the next lighting
+// Apply carries the values to the board.
+if (els.winLockToggle) {
+  els.winLockToggle.addEventListener("change", () => {
+    postPerKey("winLock", els.winLockToggle.checked);
+  });
+}
+if (els.perKeyEnable) {
+  els.perKeyEnable.addEventListener("change", async () => {
+    const payload = await postPerKey("enable", els.perKeyEnable.checked);
+    if (payload.ok && !els.perKeyEnable.checked) {
+      // Disabling per-key mode exits Edit mode with it: the grid reverts to
+      // the plain remap behavior.
+      state.perKeyEdit = false;
+      state.perKeySlot = null;
+      renderKeymapGrid();
+      renderKeymapEditor();
+      renderPerKeyPanel();
+    }
+  });
+}
+if (els.perKeyBrightness) {
+  let perKeyBrightnessTimer = null;
+  els.perKeyBrightness.addEventListener("input", () => {
+    if (els.perKeyBrightnessValue) {
+      setText(els.perKeyBrightnessValue, els.perKeyBrightness.value);
+    }
+    if (perKeyBrightnessTimer) clearTimeout(perKeyBrightnessTimer);
+    perKeyBrightnessTimer = setTimeout(() => {
+      postPerKey("brightness", Number(els.perKeyBrightness.value));
+    }, 120);
+  });
+}
+if (els.perKeyEditToggle) {
+  els.perKeyEditToggle.addEventListener("change", () => {
+    state.perKeyEdit = els.perKeyEditToggle.checked;
+    if (state.perKeyEdit) {
+      // Edit ON closes the remap drawer; the per-key target owns the grid.
+      keymap.selectedSlot = null;
+    } else {
+      // Edit OFF closes the per-key target; drawer behavior is restored.
+      state.perKeySlot = null;
+    }
+    renderKeymapGrid();
+    renderKeymapEditor();
+    renderPerKeyStrip();
+  });
+}
+if (els.perKeyResetAll) {
+  els.perKeyResetAll.addEventListener("click", () => {
+    const ops = [];
+    for (let slot = 0; slot < 120; slot += 1) {
+      ops.push({ route: "color", value: { slot, rgb: [255, 255, 255], vis: "lit" } });
+    }
+    runPerKeyBulk(ops);
+  });
+}
+if (els.perKeyClearAll) {
+  els.perKeyClearAll.addEventListener("click", () => {
+    const slots = state.perKey && state.perKey.slots
+      ? Object.keys(state.perKey.slots) : [];
+    runPerKeyBulk(slots.map((slot) => ({ route: "clear", value: Number(slot) })));
+  });
+}
+// The strip lives inside the color card: two vis chips (each toggles back to
+// Lit when re-clicked) + per-slot clear, all on the pinned routes.
+if (els.perKeyVisOff) {
+  els.perKeyVisOff.addEventListener("click", () => writePerKeySlotVis("off"));
+}
+if (els.perKeyVisBreath) {
+  els.perKeyVisBreath.addEventListener("click", () => writePerKeySlotVis("breath"));
+}
+if (els.perKeyClearSlot) {
+  els.perKeyClearSlot.addEventListener("click", () => {
+    if (!perKeyTargetActive()) return;
+    postPerKey("clear", state.perKeySlot);
   });
 }
 
@@ -1048,7 +1397,17 @@ function renderKeymapGrid() {
       button.type = "button";
       button.className = "keycap";
       button.classList.toggle("is-dirty", dirty);
-      button.classList.toggle("is-selected", keymap.selectedSlot === slot);
+      // G19A: while per-key Edit mode owns the grid the selection ring marks
+      // the COLOR target; otherwise (Edit off / per-key off) it keeps the
+      // remap-drawer selection — never both at once.
+      const perKeyMode = perKeyClickOpensColorPanel(
+        state.perKey && state.perKey.enabled,
+        state.perKeyEdit,
+      );
+      button.classList.toggle(
+        "is-selected",
+        perKeyMode ? state.perKeySlot === slot : keymap.selectedSlot === slot,
+      );
       button.dataset.slot = String(slot);
       // G18-FIX1 D1: the face shows the compact label ("LCtrl"); the tooltip
       // keeps the FULL name ("Left Ctrl") — G9 FIX B behaviour unchanged.
@@ -1063,13 +1422,33 @@ function renderKeymapGrid() {
       // everything else keeps the catalog name. Tooltip/editor untouched.
       codeEl.textContent = keycapShortLabel(code) || keymapCodeShort(code);
       button.append(labelEl, codeEl);
+      // G19A: saved per-key colors tint the cap's BOTTOM FACE (a 2px inset
+      // bar via CSS ::after) — the label stays fully readable, and OFF slots
+      // carry no tint. The tint is our stored value, never a device read.
+      const tint = perKeyTintRgb(state.perKey, slot);
+      if (tint) {
+        button.classList.add("has-perkey-color");
+        button.style.setProperty("--perkey-tint", rgbToHex(tint[0], tint[1], tint[2]));
+      }
       // G15: the tooltip shows the EFFECTIVE type the firmware honors
       // (payload type_name), and flags the cells whose type activates them.
       button.title = `Slot ${slot} · ${keymapCodeName(code)}`
         + (meta ? ` · ${meta.type_name ?? meta.code_type_label}` : "")
         + (meta && meta.cell_active ? " · cell active" : "")
-        + (dirty ? " · unsaved change" : "");
-      button.addEventListener("click", () => selectKeymapSlot(slot));
+        + (dirty ? " · unsaved change" : "")
+        // G19A: name the bottom-face tint explicitly — it is a locally
+        // stored per-key color, not something read off the keyboard.
+        + (tint ? " · per-key color (stored in this profile)" : "");
+      button.addEventListener("click", () => {
+        // G19A: while per-key Edit mode is on, the click opens the color
+        // panel for this slot instead of the remap drawer (mutually
+        // exclusive — Edit off restores the drawer click exactly).
+        if (perKeyClickOpensColorPanel(state.perKey && state.perKey.enabled, state.perKeyEdit)) {
+          selectPerKeySlot(slot);
+        } else {
+          selectKeymapSlot(slot);
+        }
+      });
       km.grid.appendChild(button);
     }
   }

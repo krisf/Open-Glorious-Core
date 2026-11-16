@@ -84,6 +84,50 @@
                         </div>
                     </div>
                     <div id="effect-grid" class="effect-grid"></div>
+                    <!-- G19A: Per-key colors subsection. Colors are stored in
+                         THIS computer's profile and re-sent on every Apply —
+                         this board has no color readback (cmd-129 mirror is a
+                         blank shadow), so no wording here may ever claim the
+                         app reads colors off the keyboard. -->
+                    <div class="per-key-block">
+                        <div class="per-key-head">
+                            <div>
+                                <p class="surface-kicker">Per-key RGB</p>
+                                <h4>Per-key colors</h4>
+                            </div>
+                            <span id="per-key-chip" class="keymap-dirty-counter" role="status">0 keys colored</span>
+                        </div>
+                        <div class="performance-row">
+                            <label class="toggle" for="per-key-enable">
+                                <input id="per-key-enable" type="checkbox">
+                                <span class="toggle-track" aria-hidden="true"></span>
+                                <span class="toggle-text"><strong>Per-key mode</strong><small>Replaces the active effect on Apply.</small></span>
+                            </label>
+                        </div>
+                        <div id="per-key-controls" class="is-hidden">
+                            <div class="control-list">
+                                <label class="control-row">
+                                    <span>Per-key brightness</span>
+                                    <div>
+                                        <input id="per-key-brightness" type="range" min="0" max="100" value="100">
+                                        <output id="per-key-brightness-value">100</output>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="performance-row">
+                                <label class="toggle" for="per-key-edit-toggle">
+                                    <input id="per-key-edit-toggle" type="checkbox">
+                                    <span class="toggle-track" aria-hidden="true"></span>
+                                    <span class="toggle-text"><strong>Edit mode</strong><small>Click a keycap below to color it — the remap drawer stays closed while this is on.</small></span>
+                                </label>
+                            </div>
+                            <div class="per-key-actions">
+                                <button id="per-key-reset-all" class="button button-secondary" type="button">Reset all keys</button>
+                                <button id="per-key-clear-all" class="button button-secondary" type="button">Clear all</button>
+                            </div>
+                        </div>
+                        <p class="per-key-hint">Per-key colors are stored in your profile on this computer and re-sent to the keyboard on every Apply — this keyboard cannot report its colors back, so what you painted here is the source of truth.</p>
+                    </div>
                 </section>
 
                 <section id="color-controls-section" class="panel control-panel">
@@ -92,6 +136,17 @@
                             <p class="surface-kicker">Custom Color</p>
                             <h3 id="color-panel-title">Picker, Hex & RGB</h3>
                             <p id="color-support-message" class="color-support-message"></p>
+                        </div>
+                        <!-- G19A: while per-key Edit mode targets a slot, this
+                             strip re-targets the SAME picker/RGB/hex machinery
+                             at that slot (writes go to /api/per-key/color). -->
+                        <div id="per-key-strip" class="per-key-strip is-hidden" role="status">
+                            <span id="per-key-strip-label">—</span>
+                            <span class="per-key-strip-actions">
+                                <button id="per-key-vis-off" class="button button-secondary" type="button">Set OFF</button>
+                                <button id="per-key-vis-breath" class="button button-secondary" type="button">Breathing</button>
+                                <button id="per-key-clear-slot" class="button button-secondary" type="button">Clear color</button>
+                            </span>
                         </div>
                         <div id="color-group-tabs" class="color-group-tabs"></div>
                         <div id="custom-color-layout" class="custom-color-layout">
@@ -163,6 +218,19 @@
                             <input id="side-lights-toggle" type="checkbox">
                             <span class="toggle-track" aria-hidden="true"></span>
                             <span class="toggle-text">Light bar on</span>
+                        </label>
+                    </div>
+                    <!-- G19A: Windows key lock. The flag rides the next
+                         Apply's properties report (byte [5]); firmware
+                         support on this board is still being verified, and
+                         there is no readback — the toggle never claims the
+                         app can see the lock state on the device. -->
+                    <div class="performance-row">
+                        <span class="performance-label">Windows key</span>
+                        <label class="toggle" for="win-lock-toggle">
+                            <input id="win-lock-toggle" type="checkbox">
+                            <span class="toggle-track" aria-hidden="true"></span>
+                            <span class="toggle-text"><strong>Windows Key Lock</strong><small>Blocks the Windows key (requires Apply; support varies by firmware).</small></span>
                         </label>
                     </div>
                 </section>
