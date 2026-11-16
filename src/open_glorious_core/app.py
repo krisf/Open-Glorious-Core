@@ -150,8 +150,28 @@ SETTINGS_PERSIST_ACTIONS = frozenset(
         "set_polling_rate",
         "set_input_latency",
         "set_side_lights",
+        # G19A: these actions never write the device; they update the local
+        # mirror and persist the settings snapshot (store is the source of
+        # truth — the board has no LED/win-lock readback).
+        "set_win_lock",
+        "set_per_key_enable",
+        "set_per_key_brightness",
+        "set_per_key_color",
+        "set_per_key_clear",
     }
 )
+
+# G19A: dedicated settings routes -> the /api/action they mirror. Same JSON
+# body shape ({"value": ...}). Validation and 400s live in the backend
+# setters; these routes NEVER write the device — the flag/colors reach the
+# keyboard with the next lighting Apply (and persist to the local store).
+SETTINGS_POST_ROUTES = {
+    "/api/win-lock": "set_win_lock",
+    "/api/per-key/enable": "set_per_key_enable",
+    "/api/per-key/brightness": "set_per_key_brightness",
+    "/api/per-key/color": "set_per_key_color",
+    "/api/per-key/clear": "set_per_key_clear",
+}
 # G16 (plan item 3): after EVERY successful apply-keymap/reset-keymap the
 # drawer banner states which profile/layer was written and how the operator
 # resolves a profile drift himself. The GUI's profile/layer is a software
@@ -792,6 +812,11 @@ class OpenGloriousCoreWebController:
                 "polling_rate": getattr(self.backend, "polling_rate", None),
                 "input_latency_ms": getattr(self.backend, "input_latency_ms", None),
                 "side_lights": getattr(self.backend, "side_lights", None),
+                # G19A: Win-lock flag + the per-key local mirror. These are
+                # what THIS COMPUTER last wrote to the store — the board has
+                # no LED readback, and the UI says so.
+                "win_lock": getattr(self.backend, "win_lock", None),
+                "per_key": self._per_key_mirror(),
             },
             "effects": getattr(self.backend, "EFFECT_LABELS", {}),
             "effect_color_groups": getattr(self.backend, "EFFECT_COLOR_GROUPS", {}),
@@ -1070,6 +1095,41 @@ class OpenGloriousCoreWebController:
         devices = detect_gmmk_pro()
         return devices[0].physical_id if devices else None
 
+    def _per_key_mirror(self) -> dict[str, Any] | None:
+        """JSON-safe deep copy of the backend per-key block (G19A).
+
+        Built fresh so a concurrent setter mutating the backend dict can
+        never tear the JSON serialization. None on backends without the
+        block. The values are the LOCAL mirror — there is no device
+        readback of LED state on this board.
+        """
+        per_key = getattr(self.backend, "per_key", None)
+        if not isinstance(per_key, dict):
+            return None
+        slots_out: dict[str, Any] = {}
+        slots = per_key.get("slots")
+        if isinstance(slots, dict):
+            for slot_key, entry in list(slots.items()):
+                if not isinstance(entry, dict):
+                    continue
+                rgb = entry.get("rgb")
+                if (
+                    isinstance(rgb, (list, tuple))
+                    and len(rgb) == 3
+                    and all(isinstance(ch, int) and not isinstance(ch, bool) for ch in rgb)
+                    and isinstance(entry.get("vis"), str)
+                ):
+                    slots_out[str(slot_key)] = {
+                        "vis": str(entry["vis"]),
+                        "rgb": [int(ch) for ch in rgb],
+                    }
+        brightness = per_key.get("brightness")
+        return {
+            "enabled": bool(per_key.get("enabled")),
+            "brightness": int(brightness) if isinstance(brightness, int) else 100,
+            "slots": slots_out,
+        }
+
     def _settings_snapshot(self) -> dict[str, Any]:
         """Current backend settings, restricted to the store schema keys."""
         backend_state = getattr(self.backend, "state", None)
@@ -1092,6 +1152,12 @@ class OpenGloriousCoreWebController:
         side_lights = getattr(self.backend, "side_lights", None)
         if isinstance(side_lights, bool):
             snapshot["side_lights"] = side_lights
+        win_lock = getattr(self.backend, "win_lock", None)
+        if isinstance(win_lock, bool):
+            snapshot["win_lock"] = win_lock
+        per_key = self._per_key_mirror()
+        if per_key is not None:
+            snapshot["per_key"] = per_key
         return snapshot
 
     def _store_record_settings(self) -> None:
@@ -1307,6 +1373,28 @@ class OpenGloriousCoreWebController:
                 message = self._backend_io(self.backend.set_input_latency, value, True)
             elif action == "set_side_lights":
                 message = self._backend_io(self.backend.set_side_lights, value, True)
+            elif action == "set_win_lock":
+                # G19A: flag only — reaches the keyboard with the next
+                # Apply (properties byte [5]); no device write here.
+                message = self._backend_io(self.backend.set_win_lock, value)
+            elif action == "set_per_key_enable":
+                message = self._backend_io(self.backend.set_per_key_enabled, value)
+            elif action == "set_per_key_brightness":
+                message = self._backend_io(self.backend.set_per_key_brightness, value)
+            elif action == "set_per_key_color":
+                if not isinstance(value, dict):
+                    return {
+                        "ok": False,
+                        "message": "Per-key color payload must be an object with 'slot' and 'rgb'.",
+                    }
+                message = self._backend_io(
+                    self.backend.set_per_key_color,
+                    value.get("slot"),
+                    value.get("rgb"),
+                    value.get("vis"),
+                )
+            elif action == "set_per_key_clear":
+                message = self._backend_io(self.backend.clear_per_key_slot, value)
             elif action == "save":
                 message = self._backend_io(self.backend.save)
             elif action == "device_indication":
@@ -1437,7 +1525,8 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent", "/api/import"):
+        if self.path not in ("/api/action", "/api/verify-remap", "/api/keyevent", "/api/import") \
+                and self.path not in SETTINGS_POST_ROUTES:
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -1467,6 +1556,17 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             # G18 commit 3: import validates + stages in the LOCAL store.
             # It physically cannot write the device (no backend call).
             result = self.controller.import_profile(payload)
+            self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
+            return
+
+        if self.path in SETTINGS_POST_ROUTES:
+            # G19A: dedicated settings routes (win-lock + per-key). Same
+            # payload contract as /api/action; validation errors answer 400.
+            # No device writes here — the store is the source of truth and
+            # the board gets the values on the next lighting Apply.
+            result = self.controller.run_action(
+                SETTINGS_POST_ROUTES[self.path], payload.get("value")
+            )
             self._send_json(result, status=HTTPStatus.OK if result.get("ok", False) else HTTPStatus.BAD_REQUEST)
             return
 

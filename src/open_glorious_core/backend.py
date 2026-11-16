@@ -31,9 +31,29 @@ class KeyboardState:
 # Commands of the vendor report-7 protocol, decoded from Glorious CORE 2.1.22's
 # own TypeScript (remap/PROTOCOL_DECODE.md; transport = FEATURE report ID 7).
 CMD_CHANGE_PROFILE = 0x01  # 4 selector bytes ONLY (ChangeProfileID)
+CMD_SET_LAYOUT = 0x06  # per-key LED layout WRITE (G19A; properties/effect sibling)
 CMD_KEY_MATRIX = 0x03  # the keymap WRITE (SendButtonMatrix2Device)
 CMD_SET_POLLING = 0x08  # SetPollingRatetoDevice (G18 P1, PROTOCOL_DECODE.md line 34)
 CMD_GET_CONFIG = 0x81  # 129: config-mirror read (our proven read path)
+
+# G19A per-key LED layout (vendor 2.1.22 ground truth, G19A_PLAN.md): the
+# layout is a 600-byte buffer = 120 slots x 5 bytes; slot i lives at i*5:
+#   +0 visible/CO_BR: 0x00 OFF, 0xFF lit, 0x01..0xFE breathing intensity
+#   +1 the slot index itself (self-identifying byte)
+#   +2..4 R, G, B
+# It is pushed as 3 pages of 200 bytes each (this board: iLayerCount=3 because
+# KeyMatrixLength <= 120) through the standalone 264-byte cmd-0x06 report.
+# Side LEDs are ordinary slots in the SAME matrix — no special encoding.
+PER_KEY_KEY_NUMBER = 83  # vendor KeyNumber constant — sent verbatim at [4]
+PER_KEY_PAGE_COUNT = 3  # pages 0..2, only report byte [5] changes
+PER_KEY_PAGE_BYTES = 200  # layout bytes carried per page, at report [8..207]
+PER_KEY_LAYOUT_SLOTS = 120
+PER_KEY_SLOT_BYTES = 5
+PER_KEY_LAYOUT_BYTES = PER_KEY_LAYOUT_SLOTS * PER_KEY_SLOT_BYTES  # 600
+PER_KEY_LAYOUT_REPORT_LENGTH = 264
+PER_KEY_BRIGHTNESS_LEVELS = 20  # byte [6]: round(brightness_percent * 20 / 100)
+# vis literal -> slot byte +0 (the vendor breathing intensity is 0xFE).
+PER_KEY_VIS_BYTES = {"off": 0x00, "lit": 0xFF, "breath": 0xFE}
 
 # G18 P1 polling-rate wire map (vendor SetPollingRatetoDevice): a STANDALONE
 # 264-byte buffer (Buffer.alloc(264)) — not the 256-byte properties framing.
@@ -230,6 +250,21 @@ class BaseBackend:
     def set_side_lights(self, value: bool, save: bool) -> str:
         raise NotImplementedError
 
+    def set_win_lock(self, value: bool) -> str:
+        raise NotImplementedError
+
+    def set_per_key_enabled(self, value: bool) -> str:
+        raise NotImplementedError
+
+    def set_per_key_brightness(self, value: int) -> str:
+        raise NotImplementedError
+
+    def set_per_key_color(self, slot: int, rgb: object, vis: object = None) -> str:
+        raise NotImplementedError
+
+    def clear_per_key_slot(self, slot: int) -> str:
+        raise NotImplementedError
+
     def device_indication(self) -> str:
         raise NotImplementedError
 
@@ -394,6 +429,18 @@ class StockGmmkProBackend(BaseBackend):
         self.polling_rate = 1000
         self.input_latency_ms = 16
         self.side_lights = True
+        # G19A Win-lock: properties byte [5], 0 = unlocked / 1 = locked.
+        # DEFAULT UNLOCKED keeps the emitted wire BYTE-IDENTICAL to pre-G19A.
+        # Board support is pending the physical gate; this is honest plumbing,
+        # not a verified device feature.
+        self.win_lock = False
+        # G19A per-key RGB. THE LOCAL STORE IS THE SOURCE OF TRUTH: the
+        # cmd-129 config mirror is blank-shadow on this board (live evidence
+        # 2026-11-15: 256 zero bytes) — there is NO LED state readback, ever.
+        # Shape (mirrored 1:1 into the store settings):
+        #   {"enabled": bool, "brightness": 0..100,
+        #    "slots": {str(slot): {"vis": "off|lit|breath", "rgb": [r, g, b]}}}
+        self.per_key: dict = {"enabled": False, "brightness": 100, "slots": {}}
         self.profile = 1
         self.layer = 1
         if self.hidraw is not None:
@@ -526,6 +573,174 @@ class StockGmmkProBackend(BaseBackend):
         self._apply_current_state()
         state = "on" if value else "off"
         return f"Side lights turned {state} on {self.hidraw.name}."
+
+    # -- G19A: Win-lock flag + per-key RGB (local-mirror state) --------------
+    #
+    # These setters NEVER write the device: they update the in-memory state
+    # the controller persists to the local store. The wire effect happens on
+    # the NEXT lighting Apply (_apply_current_state): win-lock rides the
+    # properties report byte [5], the per-key colors ride the three cmd-0x06
+    # layout pages. There is NO readback on this board (blank-shadow mirror)
+    # — this state, persisted locally, is the source of truth.
+
+    def set_win_lock(self, value: bool) -> str:
+        """Win-lock flag for properties byte [5] (0 = unlocked, 1 = locked).
+
+        Vendor ground truth: Glorious CORE hardcodes 0x00 here
+        (GmmkSeries.ts SetLEDTypeToDevice: `Data[5] = 0x00; //Win_Lock`);
+        board support is PENDING THE PHYSICAL GATE. No device write here —
+        the flag reaches the keyboard with the next Apply.
+        """
+        if not isinstance(value, bool):
+            raise BackendError(f"Win-lock switch must be true or false, got {value!r}.")
+        self.win_lock = value
+        state = "locked" if value else "unlocked"
+        return (
+            f"Windows key {state} locally — reaches the keyboard with the "
+            "next lighting Apply (no device readback)."
+        )
+
+    def set_per_key_enabled(self, value: bool) -> str:
+        """Per-key mode switch: only when enabled do the layout pages join
+        the Apply flow (properties -> effect -> layout pages -> profile)."""
+        if not isinstance(value, bool):
+            raise BackendError(f"Per-key mode switch must be true or false, got {value!r}.")
+        self.per_key["enabled"] = value
+        state = "enabled" if value else "disabled"
+        return (
+            f"Per-key mode {state} locally — colors reach the keyboard with "
+            "the next lighting Apply (saved on this computer; no device readback)."
+        )
+
+    def set_per_key_brightness(self, value: int) -> str:
+        """Per-key global brightness percent (layout report byte [6])."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise BackendError(f"Per-key brightness must be an integer 0-100, got {value!r}.")
+        if not 0 <= value <= 100:
+            raise BackendError(f"Per-key brightness must be 0-100, got {value}.")
+        self.per_key["brightness"] = value
+        return (
+            f"Per-key brightness saved at {value}% — reaches the keyboard "
+            "with the next lighting Apply (no device readback)."
+        )
+
+    def set_per_key_color(self, slot: int, rgb: object, vis: object = None) -> str:
+        """One slot entry: create with default vis 'lit', or update IN PLACE
+        (rgb set, existing vis preserved — breathing stays breathing) unless
+        an explicit vis is given. Absent slots encode 5 zero bytes; entries
+        always carry the slot index at +1."""
+        slot_int = self._per_key_slot(slot)
+        color = self._per_key_rgb(rgb)
+        vis_name = None if vis is None else self._per_key_vis(vis)
+        key = str(slot_int)
+        entry = self.per_key["slots"].get(key)
+        if entry is None:
+            self.per_key["slots"][key] = {
+                "vis": vis_name if vis_name is not None else "lit",
+                "rgb": color,
+            }
+        else:
+            entry["rgb"] = color
+            if vis_name is not None:
+                entry["vis"] = vis_name
+        return (
+            f"Slot {slot_int} color saved locally — reaches the keyboard "
+            "with the next lighting Apply (no device readback)."
+        )
+
+    def clear_per_key_slot(self, slot: int) -> str:
+        """Remove a slot entry: absent slots encode as 5 zero bytes."""
+        slot_int = self._per_key_slot(slot)
+        self.per_key["slots"].pop(str(slot_int), None)
+        return (
+            f"Slot {slot_int} cleared locally — reaches the keyboard with "
+            "the next lighting Apply (no device readback)."
+        )
+
+    @staticmethod
+    def _per_key_slot(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise BackendError(
+                f"Per-key slot must be an integer 0-{PER_KEY_LAYOUT_SLOTS - 1}, got {value!r}."
+            )
+        if not 0 <= value < PER_KEY_LAYOUT_SLOTS:
+            raise BackendError(
+                f"Per-key slot must be 0-{PER_KEY_LAYOUT_SLOTS - 1}, got {value}."
+            )
+        return int(value)
+
+    @staticmethod
+    def _per_key_rgb(value: object) -> list[int]:
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 3
+            or any(isinstance(ch, bool) or not isinstance(ch, int) for ch in value)
+            or not all(0 <= ch <= 255 for ch in value)
+        ):
+            raise BackendError(
+                "Per-key color must be three bytes 0-255 [r, g, b], "
+                f"got {value!r}."
+            )
+        return [int(ch) for ch in value]
+
+    @staticmethod
+    def _per_key_vis(value: object) -> str:
+        if not isinstance(value, str) or value not in PER_KEY_VIS_BYTES:
+            raise BackendError(
+                "Per-key visibility must be one of "
+                f"{sorted(PER_KEY_VIS_BYTES)}, got {value!r}."
+            )
+        return value
+
+    def build_per_key_layout(self) -> bytes:
+        """The 600-byte vendor layout buffer: 120 slots x 5 bytes at i*5.
+
+        Entry slot: +0 = vis byte (off 0x00 / lit 0xFF / breath 0xFE),
+        +1 = the slot index itself, +2..4 = R, G, B. Absent slot: 5 zero
+        bytes. Side LEDs are ordinary slots here — no special encoding.
+        """
+        layout = bytearray(PER_KEY_LAYOUT_BYTES)
+        for slot_key, entry in self.per_key["slots"].items():
+            slot = self._per_key_slot(int(slot_key))
+            base = slot * PER_KEY_SLOT_BYTES
+            layout[base] = PER_KEY_VIS_BYTES[entry["vis"]]
+            layout[base + 1] = slot
+            layout[base + 2 : base + 5] = self._per_key_rgb(entry["rgb"])
+        return bytes(layout)
+
+    def _prepare_per_key_layout_buffer(self, report: bytearray, page: int) -> None:
+        """Vendor per-key layout report (cmd 0x06, standalone 264-byte
+        buffer): [2]=profile+1-style selectors identical to the cmd-0x03
+        writer, [4]=KeyNumber 83, [5]=page 0..2, [6]=global brightness
+        0..20, [8..207]=the 200-byte page slice of the 600-byte layout."""
+        if not 0 <= int(page) < PER_KEY_PAGE_COUNT:
+            raise BackendError(
+                f"Per-key layout page must be 0-{PER_KEY_PAGE_COUNT - 1}, got {page!r}."
+            )
+        layout = self.build_per_key_layout()
+        report[0] = self.REPORT_ID
+        report[1] = CMD_SET_LAYOUT
+        report[2] = self.profile
+        report[3] = self.layer
+        report[4] = PER_KEY_KEY_NUMBER
+        report[5] = int(page)
+        report[6] = round(
+            self.per_key["brightness"] * PER_KEY_BRIGHTNESS_LEVELS / 100
+        )
+        start = int(page) * PER_KEY_PAGE_BYTES
+        report[8 : 8 + PER_KEY_PAGE_BYTES] = layout[start : start + PER_KEY_PAGE_BYTES]
+
+    def apply_per_key_layout(self) -> str:
+        """Push the layout: pages 0, 1, 2 sequentially, same report shape,
+        only byte [5] changes (vendor iLayerCount=3 on this board)."""
+        for page in range(PER_KEY_PAGE_COUNT):
+            page_report = bytearray(PER_KEY_LAYOUT_REPORT_LENGTH)
+            self._prepare_per_key_layout_buffer(page_report, page)
+            self._send_feature_report(page_report)
+        return (
+            f"Sent the per-key layout in {PER_KEY_PAGE_COUNT} pages "
+            "(colors come from this computer's store — the board has no readback)."
+        )
 
     def device_indication(self) -> str:
         raise BackendError("Device indication is not mapped yet for stock firmware.")
@@ -926,6 +1141,12 @@ class StockGmmkProBackend(BaseBackend):
         self._prepare_change_profile_buffer(profile_update)
         self._send_feature_report(properties)
         self._send_feature_report(effect)
+        # G19A vendor apply order: properties (0x07) -> effect (0x02) ->
+        # per-key layout pages (0x06 x3) -> profile-update. The pages join
+        # the flow ONLY while per-key mode is enabled, so the default
+        # (disabled) wire stays byte-identical to HEAD.
+        if self.per_key["enabled"]:
+            self.apply_per_key_layout()
         self._send_feature_report(profile_update)
 
     def _prepare_properties_buffer(self, report: bytearray) -> None:
@@ -934,7 +1155,11 @@ class StockGmmkProBackend(BaseBackend):
         report[2] = self.profile
         report[3] = self.layer
         report[4] = self.state.effect
-        report[5] = 0  # Win_Lock: the vendor always writes 0 (no win-lock UI in G18)
+        # G19A: Win_Lock. The vendor HARDCODES 0x00 here on this board
+        # (GmmkSeries.ts); our toggle defaults UNLOCKED (0), which keeps the
+        # byte — and the whole report — identical to HEAD. Board support is
+        # pending the physical gate.
+        report[5] = 1 if self.win_lock else 0
         report[6] = 1  # PerKey_sw
         # G18 P2 INVERTED switch: side lights ON -> 0, OFF -> 1. Default ON
         # keeps the pre-G18 byte value 0 (P3 byte-identical behavior).

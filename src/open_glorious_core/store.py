@@ -16,7 +16,8 @@ document "corrupt"):
              "layers": {
                <layer 1..3>: {
                  "settings": {brightness, speed, effect, color_name,
-                              polling_rate, input_latency_ms, side_lights},
+                              polling_rate, input_latency_ms, side_lights,
+                              win_lock, per_key},
                  "keymap":   {<slot 0..119>: <code 0..255>}   # partial OK
                }}}}}}}
 
@@ -60,8 +61,18 @@ SETTING_KEYS = frozenset(
         "polling_rate",
         "input_latency_ms",
         "side_lights",
+        # G19A: Win-lock flag + the per-key RGB local mirror. The per-key
+        # block is the SOURCE OF TRUTH for LED colors — this board has no
+        # readback (blank-shadow cmd-129 mirror).
+        "win_lock",
+        "per_key",
     }
 )
+
+# G19A per-key vis literals (slot byte +0: 0x00 / 0xFF / 0xFE on the wire).
+PER_KEY_VIS = frozenset({"off", "lit", "breath"})
+PER_KEY_SLOTS = 120
+PER_KEY_BLOCK_KEYS = frozenset({"enabled", "brightness", "slots"})
 
 
 class StoreError(ValueError):
@@ -90,6 +101,67 @@ def _plain_int(value: Any, low: int, high: int, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
         raise StoreError(f"{field} must be an int {low}..{high}, got {value!r}")
     return int(value)
+
+
+def validate_per_key_entry(value: Any, where: str) -> dict[str, Any]:
+    """One slot entry: {"vis": one of the three literals, "rgb": 3 bytes}."""
+    if not isinstance(value, dict):
+        raise StoreError(f"{where} must be an object with 'vis' and 'rgb'")
+    unknown = set(value) - {"vis", "rgb"}
+    if unknown:
+        raise StoreError(f"{where} has unknown keys: {sorted(unknown)}")
+    vis = value.get("vis")
+    if not isinstance(vis, str) or vis not in PER_KEY_VIS:
+        raise StoreError(
+            f"{where} vis must be one of {sorted(PER_KEY_VIS)}, got {vis!r}"
+        )
+    rgb = value.get("rgb")
+    if not isinstance(rgb, (list, tuple)) or len(rgb) != 3:
+        raise StoreError(f"{where} rgb must be three bytes 0..255, got {rgb!r}")
+    return {
+        "vis": str(vis),
+        "rgb": [
+            _plain_int(ch, 0, 255, f"{where} rgb channel") for ch in rgb
+        ],
+    }
+
+
+def validate_per_key(value: Any) -> dict[str, Any]:
+    """Validate the G19A per-key block; raises StoreError on anything invalid.
+
+    Shape: {"enabled": bool, "brightness": 0..100,
+            "slots": {<slot 0..119>: {"vis": "off|lit|breath",
+                                      "rgb": [r, g, b]}}}
+    Slots keys must be digit strings in 0..119 (same convention as keymap).
+    """
+    if not isinstance(value, dict):
+        raise StoreError("per_key must be an object")
+    unknown = set(value) - PER_KEY_BLOCK_KEYS
+    if unknown:
+        raise StoreError(f"per_key has unknown keys: {sorted(unknown)}")
+    out: dict[str, Any] = {}
+    if "enabled" in value:
+        enabled = value["enabled"]
+        if not isinstance(enabled, bool):
+            raise StoreError(f"per_key enabled must be a boolean, got {enabled!r}")
+        out["enabled"] = enabled
+    if "brightness" in value:
+        out["brightness"] = _plain_int(value["brightness"], 0, 100, "per_key brightness")
+    if "slots" in value:
+        slots = value["slots"]
+        if not isinstance(slots, dict):
+            raise StoreError("per_key slots must be an object of slot -> entry")
+        out_slots: dict[str, Any] = {}
+        for slot_key, entry in slots.items():
+            if not isinstance(slot_key, str) or not slot_key.isdigit():
+                raise StoreError(
+                    "per_key slot keys must be integers 0.."
+                    f"{PER_KEY_SLOTS - 1}, got {slot_key!r}"
+                )
+            slot = _plain_int(int(slot_key), 0, PER_KEY_SLOTS - 1, "per_key slot")
+            out_slots[str(slot)] = validate_per_key_entry(entry, f"per_key slot {slot}")
+        out["slots"] = out_slots
+    return out
 
 
 def validate_settings(value: Any) -> dict[str, Any]:
@@ -126,6 +198,13 @@ def validate_settings(value: Any) -> dict[str, Any]:
         if not isinstance(lights, bool):
             raise StoreError(f"side_lights must be a boolean, got {lights!r}")
         out["side_lights"] = lights
+    if "win_lock" in value:
+        locked = value["win_lock"]
+        if not isinstance(locked, bool):
+            raise StoreError(f"win_lock must be a boolean, got {locked!r}")
+        out["win_lock"] = locked
+    if "per_key" in value:
+        out["per_key"] = validate_per_key(value["per_key"])
     return out
 
 
