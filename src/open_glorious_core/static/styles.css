@@ -1314,3 +1314,423 @@ output {
     background: var(--perkey-tint, transparent);
     pointer-events: none;
 }
+
+/* ===========================================================================
+   G19B commit 2 — Macro Editor + drawer Macros category.
+   Same card/grid design language as the rest of the control stack. Dark
+   theme with SOLID backgrounds on every interactive surface (G14/G18 drawer
+   opacity lessons: no translucent fields, no blur). At 1440x900 the panel
+   never overflows: two columns collapse under 1100px and the step list
+   scrolls inside a capped height instead of stretching the page.
+   ========================================================================= */
+
+/* Cap badge: absolutely positioned so the G18 label layout of EVERY cap
+   (macro or not) stays pixel-identical — nothing shifts, nothing truncates.
+   Solid chip (no alpha bleed from the keycap gradient behind it). */
+.keycap-macro-badge {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    padding: 1px 4px;
+    border-radius: 5px;
+    background: #101010;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 0.58rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.04em;
+    pointer-events: none;
+}
+
+.keycap.has-macro {
+    border-color: rgba(243, 154, 35, 0.55);
+}
+
+/* Drawer: the macro hint line (store-is-truth wording) and the Macros
+   category entries (dot instead of a hex column). */
+.keymap-macro-hint {
+    margin: 0;
+    color: var(--accent);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.keymap-code-item.keymap-macro-item.is-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.macro-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    border: 1px solid var(--muted);
+    background: transparent;
+}
+
+.macro-dot.is-filled {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+/* --- Panel layout ------------------------------------------------------- */
+
+.macro-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.keymap-dirty-counter.is-pending {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.macro-layout {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+@media (max-width: 1100px) {
+    .macro-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.macro-list-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.macro-col-kicker,
+.macro-steps-kicker {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.macro-col-hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.5;
+}
+
+.macro-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Solid rows (no panel alpha) — the list is the densest surface here. */
+.macro-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-soft);
+    cursor: pointer;
+}
+
+.macro-row.is-active {
+    border-color: var(--accent);
+}
+
+.macro-row-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: #111111;
+    color: var(--text);
+    font-size: 0.84rem;
+}
+
+.macro-row-name:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.macro-row-name:disabled {
+    color: var(--muted);
+    background: #141414;
+}
+
+.macro-row-use {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+.macro-row-delete {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: #111111;
+    color: var(--muted);
+    font-size: 0.72rem;
+    cursor: pointer;
+}
+
+.macro-row-delete:hover:not(:disabled) {
+    color: #ff7a6e;
+    border-color: rgba(255, 122, 110, 0.5);
+}
+
+.macro-row-delete:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* --- Editor column ------------------------------------------------------- */
+
+.macro-empty-note {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.macro-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+
+.macro-editor-head h4 {
+    margin: 2px 0 0;
+    font-size: 1.05rem;
+}
+
+.macro-repeat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+
+@media (max-width: 1100px) {
+    .macro-repeat-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+.macro-repeat-option {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-soft);
+    cursor: pointer;
+}
+
+.macro-repeat-option:has(input:checked) {
+    border-color: var(--accent);
+}
+
+.macro-repeat-option input {
+    margin-top: 3px;
+    accent-color: var(--accent);
+}
+
+.macro-repeat-option strong {
+    display: block;
+    font-size: 0.86rem;
+}
+
+.macro-repeat-option small {
+    display: block;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 0.74rem;
+    line-height: 1.4;
+}
+
+/* Step list scrolls inside the card — the page itself never overflows at
+   1440x900 even with all 82 steps. */
+.macro-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.macro-step-row {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) 64px 92px 28px;
+    gap: 8px;
+    align-items: center;
+}
+
+.macro-step-index {
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-align: right;
+}
+
+.macro-step-key {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.84rem;
+}
+
+/* Down/Up pill: solid fills (G14/G18 lesson again), never translucent. */
+.macro-step-pill {
+    padding: 3px 0;
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.macro-step-pill.is-down {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #161616;
+}
+
+.macro-step-pill.is-up {
+    background: #111111;
+    color: var(--muted);
+}
+
+.macro-step-pill:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.macro-step-delay {
+    width: 100%;
+    padding: 4px 8px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    background: #111111;
+    color: var(--text);
+    font-size: 0.8rem;
+    text-align: right;
+}
+
+.macro-step-delay:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.macro-step-remove {
+    padding: 2px 6px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.macro-step-remove:hover:not(:disabled) {
+    color: #ff7a6e;
+}
+
+.macro-step-count {
+    margin-left: 6px;
+    color: var(--muted);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.macro-steps-empty {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+.macro-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Recording state: solid RED fill, unmistakable, no alpha. */
+#macro-record.is-recording {
+    background: #c92f22;
+    border-color: #c92f22;
+    color: #ffffff;
+}
+
+.macro-record-status,
+.macro-status {
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.macro-add-step {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px;
+}
+
+.macro-add-step span,
+.macro-add-key span,
+.macro-add-delay span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.macro-add-key select,
+.macro-add-delay input,
+.macro-add-step select {
+    padding: 7px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    background: #111111;
+    color: var(--text);
+    font-size: 0.84rem;
+}
+
+.macro-add-key select {
+    min-width: 220px;
+    max-width: 320px;
+}
+
+.macro-add-delay input {
+    width: 92px;
+    text-align: right;
+}
+
+.macro-editor-commit {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.macro-footer-note {
+    margin: 4px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--panel-border);
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}

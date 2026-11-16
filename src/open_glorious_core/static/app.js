@@ -23,6 +23,12 @@ const state = {
   perKeyEdit: false, // Edit mode switch: keycap clicks target the color panel
   perKeySlot: null, // slot the shared picker is currently targeting
   perKeyBusy: false, // bulk op (Paint all / Remove all) in flight
+  // G19B: macro library + slot->MacroID assignments mirrored from
+  // /api/state. The LOCAL STORE is the only truth — this keyboard cannot
+  // report macros back (plan, live evidence 2026-11-15), so these always
+  // reflect what THIS app saved or imported, never a device read.
+  macros: {},
+  macroSlots: {},
 };
 
 const els = {
@@ -360,6 +366,176 @@ function pickerHandleOffset(raw, dimension, radius) {
   return Math.max(lo, Math.min(hi, Number(raw)));
 }
 // [PURE-PICKER-END]
+
+// [PURE-MACRO-START]
+// Pure, DOM-free macro helpers (G19B commit 2). Extracted verbatim between
+// these markers and unit-tested headlessly by tests/test_macros_js.py (node).
+// The LOCAL STORE is the macro truth (this board cannot report macros back —
+// plan, live evidence 2026-11-15); nothing here ever claims a device read.
+// MacroID 0..9 render as M1..M10. Every step delay is an integer 1..65535 ms
+// with NO zero special case: the plan pins delay >= 1 everywhere, and this
+// writer REJECTS 0 upstream (store/API) rather than silently rewriting it —
+// clampStepDelay below is the UI-floor helper for fields and recorded
+// timestamps, not a policy that turns 0 into wire bytes.
+const MACRO_ID_COUNT = 10;
+// 82 = floor(248 payload bytes / 3 bytes per event) — the wire cap (plan).
+const MACRO_MAX_STEPS = 82;
+const MACRO_STEP_DEFAULT_DELAY = 50; // ms pre-edit default for a new step
+
+function macroLabel(id) {
+  const n = Number(id);
+  if (!Number.isInteger(n) || n < 0 || n >= MACRO_ID_COUNT) return "";
+  return `M${n + 1}`;
+}
+
+function macroHasContent(entry) {
+  return Boolean(entry) && Array.isArray(entry.events) && entry.events.length >= 1;
+}
+
+function macroNameOrLabel(macros, id) {
+  const entry = macros ? macros[String(id)] : null;
+  const name = entry && typeof entry.name === "string" ? entry.name.trim() : "";
+  return name || macroLabel(id);
+}
+
+function macroUseCount(macroSlots, id) {
+  const target = Number(id);
+  if (!Number.isInteger(target)) return 0;
+  const slots = macroSlots || {};
+  let count = 0;
+  for (const key of Object.keys(slots)) {
+    if (Number(slots[key]) === target) count += 1;
+  }
+  return count;
+}
+
+function macroUseLabel(count) {
+  const n = Number(count) || 0;
+  return n === 0 ? "unused" : `used on ${n} key${n === 1 ? "" : "s"}`;
+}
+
+// Drawer "Macros" category entries (plan): M1..M10 always listed; a macro
+// with stored content carries a filled dot (entry.filled) and is clickable;
+// an empty macro is disabled — the server refuses to assign macros without
+// stored content, so the drawer must not offer it. `code: null` keeps these
+// entries out of the hex-query path of keyEntryMatches.
+function macroDrawerEntries(macros) {
+  const out = [];
+  for (let id = 0; id < MACRO_ID_COUNT; id += 1) {
+    const entry = macros ? macros[String(id)] : null;
+    const filled = macroHasContent(entry);
+    const name = entry && typeof entry.name === "string" ? entry.name.trim() : "";
+    out.push({
+      macro: true,
+      macroId: id,
+      code: null,
+      group: "macro",
+      name: name ? `${macroLabel(id)} · ${name}` : macroLabel(id),
+      aliases: ["macro", macroLabel(id).toLowerCase()].concat(name ? [name] : []),
+      filled,
+    });
+  }
+  return out;
+}
+
+function clampStepDelay(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return 1;
+  if (n < 1) return 1;
+  return n > 65535 ? 65535 : n;
+}
+
+// Recorded gaps are MEASUREMENTS (performance.now deltas), so they clamp;
+// operator-entered delays are validated instead (0 is rejected upstream).
+function recordStepDelta(prevTs, now) {
+  return clampStepDelay(Number(now) - Number(prevTs));
+}
+
+// Modifier keys are IGNORED while recording (plan): the browser routes
+// modifier combos to the OS/page, so steps recorded through them could not
+// replay faithfully. Window-level capture is deliberate (the plan accepts
+// it) — while Record is on, EVERY non-modifier keydown/keyup counts, even
+// one typed into a text field; press Record again to stop.
+const MACRO_MODIFIER_CODES = new Set([
+  "ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight",
+  "AltLeft", "AltRight", "MetaLeft", "MetaRight",
+]);
+const MACRO_MODIFIER_KEYS = new Set(["Control", "Shift", "Alt", "Meta", "OS"]);
+
+function isRecordingIgnoredKey(evt) {
+  if (!evt || typeof evt !== "object") return true;
+  if (evt.repeat) return true; // plan: e.repeat is dropped
+  if (MACRO_MODIFIER_CODES.has(evt.code)) return true;
+  return MACRO_MODIFIER_KEYS.has(evt.key);
+}
+
+// KeyboardEvent.code -> HID usage for the recorder. Transcribed from the
+// server's G12-verified KEY_EVENT_CODE_VARIANTS table (app.py — first
+// variant per code, plus the standard W3C "Arrow*" spellings alongside the
+// harness table's arrow aliases) so the recorder and the G12 verifier agree
+// on every name. Modifier codes are DELIBERATELY ABSENT (ignored above).
+const MACRO_BROWSER_TO_HID = Object.freeze({
+  "KeyA": 4, "KeyB": 5, "KeyC": 6, "KeyD": 7, "KeyE": 8, "KeyF": 9, "KeyG": 10,
+  "KeyH": 11, "KeyI": 12, "KeyJ": 13, "KeyK": 14, "KeyL": 15, "KeyM": 16,
+  "KeyN": 17, "KeyO": 18, "KeyP": 19, "KeyQ": 20, "KeyR": 21, "KeyS": 22,
+  "KeyT": 23, "KeyU": 24, "KeyV": 25, "KeyW": 26, "KeyX": 27, "KeyY": 28,
+  "KeyZ": 29, "Digit1": 30, "Digit2": 31, "Digit3": 32, "Digit4": 33,
+  "Digit5": 34, "Digit6": 35, "Digit7": 36, "Digit8": 37, "Digit9": 38,
+  "Digit0": 39, "Enter": 40, "Escape": 41, "Backspace": 42, "Tab": 43,
+  "Space": 44, "Minus": 45, "Equal": 46, "BracketLeft": 47, "BracketRight": 48,
+  "Backslash": 49, "IntlBackslash": 50, "Semicolon": 51, "Quote": 52,
+  "Backquote": 53, "Comma": 54, "Period": 55, "Slash": 56, "CapsLock": 57,
+  "F1": 58, "F2": 59, "F3": 60, "F4": 61, "F5": 62, "F6": 63, "F7": 64,
+  "F8": 65, "F9": 66, "F10": 67, "F11": 68, "F12": 69, "PrintScreen": 70,
+  "ScrollLock": 71, "Pause": 72, "Insert": 73, "Home": 74, "PageUp": 75,
+  "Delete": 76, "End": 77, "PageDown": 78, "RightArrow": 79, "LeftArrow": 80,
+  "DownArrow": 81, "UpArrow": 82, "ArrowRight": 79, "ArrowLeft": 80,
+  "ArrowDown": 81, "ArrowUp": 82, "NumLock": 83, "NumpadDivide": 84,
+  "NumpadMultiply": 85, "NumpadSubtract": 86, "NumpadAdd": 87,
+  "NumpadEnter": 88, "Numpad1": 89, "Numpad2": 90, "Down": 90, "Numpad3": 91,
+  "Numpad4": 92, "Left": 92, "Numpad5": 93, "Clear": 93, "Numpad6": 94,
+  "Right": 94, "Numpad7": 95, "Numpad8": 96, "Up": 96, "Numpad9": 97,
+  "Numpad0": 98, "NumpadDecimal": 99, "ContextMenu": 101, "NumpadEqual": 103,
+  "F13": 104, "F14": 105, "F15": 106, "F16": 107, "F17": 108, "F18": 109,
+  "F19": 110, "F20": 111, "F21": 112, "F22": 113, "F23": 114, "F24": 115,
+  "Execute": 116, "Help": 117, "AudioVolumeStop": 120, "Again": 121,
+  "Undo": 122, "Cut": 123, "Copy": 124, "Paste": 125, "Find": 126,
+  "VolumeMute": 127, "VolumeUp": 128, "VolumeDown": 129, "NumpadComma": 133,
+  "IntlRo": 135, "International1": 135, "IntlYen": 136, "International2": 136,
+  "International3": 137, "International4": 138, "International5": 139,
+  "International6": 140, "International7": 141, "International8": 142,
+  "International9": 143, "Lang1": 144, "Lang2": 145, "Lang3": 146,
+  "Lang4": 147, "Lang5": 148, "Lang6": 149, "Lang7": 150, "Lang8": 151,
+  "Lang9": 152, "Lang10": 153,
+});
+
+function browserCodeToHid(code) {
+  if (typeof code !== "string" || !code) return null;
+  const hid = MACRO_BROWSER_TO_HID[code];
+  return hid === undefined ? null : hid;
+}
+
+// Draft -> /api/macro/save payload (wire shape, plan): events keep EXACTLY
+// the keys {down, code, delay}, capped at the 82-event limit. DELIBERATE
+// split (decided in commit 1, pinned by tests): clampStepDelay here is a last-mile
+// wire-shape guard for MEASURED values; the manual save path REJECTS bad
+// delays in saveMacro() before this is ever reached — the store refuses
+// delay 0 (plan) and no UI path silently rewrites operator input into
+// different bytes.
+function buildMacroSavePayload(id, name, repeat, steps) {
+  const list = (Array.isArray(steps) ? steps : []).slice(0, MACRO_MAX_STEPS);
+  return {
+    id: Number(id) | 0,
+    name: String(name == null ? "" : name),
+    repeat: Number(repeat) | 0,
+    events: list.map((s) => ({
+      down: Boolean(s && s.down),
+      code: Number(s && s.code) | 0,
+      delay: clampStepDelay(s ? s.delay : 0),
+    })),
+  };
+}
+// [PURE-MACRO-END]
 
 function rgbToHex(red, green, blue) {
   return `#${[red, green, blue].map((value) => clampByte(value).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
@@ -759,6 +935,13 @@ function applyPayload(payload) {
   updateColorControls(activeEffect);
   // G19A: win-lock toggle, per-key subsection, keycap tints + strip.
   renderPerKeyPanel();
+  // G19B: macro library + assignments mirror (top-level payload keys — the
+  // store is the truth; this is never a device read).
+  if (payload.macros || payload.macro_slots) {
+    state.macros = payload.macros || {};
+    state.macroSlots = payload.macro_slots || {};
+  }
+  renderMacroPanel();
   renderKeymapGrid();
 }
 
@@ -1177,6 +1360,9 @@ const KEYMAP_NON_KEYCAP = new Set(KEYMAP_TABLE
 const KEYMAP_GROUP_ORDER = [
   "alpha", "numeric", "fkeys", "modifiers", "nav",
   "keypad", "media", "punct", "editing", "system", "intl", "vendor", "other",
+  // G19B: UI-synthesized drawer category (NOT a keycodes.code_group) —
+  // macroDrawerEntries() produces it from the stored macro library.
+  "macro",
 ];
 // G9 FIX C: human headings for the dropdown group headings (empty query
 // shows the FULL grouped list under these).
@@ -1194,6 +1380,8 @@ const KEYMAP_GROUP_LABELS = {
   intl: "International",
   vendor: "Vendor specials",
   other: "Other",
+  // G19B: drawer category for M1..M10 (plan: new category "Macros").
+  macro: "Macros",
 };
 
 const keymap = {
@@ -1223,6 +1411,8 @@ const km = {
   editorCurrent: document.getElementById("keymap-editor-current"),
   editorFactory: document.getElementById("keymap-editor-factory"),
   editorType: document.getElementById("keymap-editor-type"),
+  // G19B: honest "this cap carries M#" line (local store truth).
+  editorMacro: document.getElementById("keymap-editor-macro"),
   search: document.getElementById("keymap-search"),
   codeList: document.getElementById("keymap-code-list"),
   revertKey: document.getElementById("keymap-revert-key"),
@@ -1395,6 +1585,11 @@ function applyKeystate(payload) {
   keymap.buffer = keymap.baseline.slice();
   keymap.selectedSlot = null;
   keymap.busy = false;
+  // G19B: the Macro Editor's "Add step" catalog reads keymap.codes from
+  // this payload, and step names render through keymapCodeName — refresh
+  // the panel whenever the catalog (re)arrives.
+  populateMacroStepCatalog();
+  renderMacroPanel();
   renderKeymapMeta();
   renderKeymapProfiles();
   renderKeymapGrid();
@@ -1410,12 +1605,27 @@ function renderKeymapMeta() {
     toggleHidden(km.writeButton, false);
     return;
   }
-  setText(km.dirtyCounter, `${count} unsaved change${count === 1 ? "" : "s"}`);
+  // G19B: macros saved/assigned since the last Apply ride the SAME apply
+  // path (the matrix write stages the 0x04/0x05 reports), so the existing
+  // dirty indicator names them — the write button shows even with zero key
+  // diffs when macros are pending. G9 FIX E grammar rules still hold.
+  const macroPending = macro.dirty;
+  const suffix = macroPending ? " · macros waiting for Apply" : "";
+  setText(km.dirtyCounter, `${count} unsaved change${count === 1 ? "" : "s"}${suffix}`);
   // G9 FIX E: the write button only exists while there is something to write,
   // and its label is grammatical (never "N key(s)").
-  setText(km.writeButton, `Write ${count} key${count === 1 ? "" : "s"} to keyboard`);
-  toggleHidden(km.writeButton, count === 0);
-  if (km.writeButton) km.writeButton.disabled = count === 0 || !keymapIsEditable();
+  let label;
+  if (count === 0) {
+    label = macroPending ? "Write macros to keyboard" : "Write keys to keyboard";
+  } else {
+    label = `Write ${count} key${count === 1 ? "" : "s"}`
+      + (macroPending ? " + macros" : "") + " to keyboard";
+  }
+  setText(km.writeButton, label);
+  toggleHidden(km.writeButton, count === 0 && !macroPending);
+  if (km.writeButton) {
+    km.writeButton.disabled = (count === 0 && !macroPending) || !keymapIsEditable();
+  }
 }
 
 function renderKeymapProfiles() {
@@ -1505,6 +1715,18 @@ function renderKeymapGrid() {
       // everything else keeps the catalog name. Tooltip/editor untouched.
       codeEl.textContent = keycapShortLabel(code) || keymapCodeShort(code);
       button.append(labelEl, codeEl);
+      // G19B: macro-assigned caps get a short "M3"-style TOP badge (plan),
+      // absolutely positioned so the G18 no-truncation label layout is
+      // byte-identical for every non-macro cap (nothing shifts). The badge
+      // mirrors the LOCAL STORE assignment, never a device read.
+      const slotMacro = macroForSlot(slot);
+      if (slotMacro !== null) {
+        button.classList.add("has-macro");
+        const badge = document.createElement("span");
+        badge.className = "keycap-macro-badge";
+        badge.textContent = macroLabel(slotMacro);
+        button.append(badge);
+      }
       // G19A: saved per-key colors tint the cap's BOTTOM FACE (a 2px inset
       // bar via CSS ::after) — the label stays fully readable, and OFF slots
       // carry no tint. The tint is our stored value, never a device read.
@@ -1516,7 +1738,11 @@ function renderKeymapGrid() {
       // G15: the tooltip shows the EFFECTIVE type the firmware honors
       // (payload type_name), and flags the cells whose type activates them.
       button.title = `Slot ${slot} · ${keymapCodeName(code)}`
-        + (meta ? ` · ${meta.type_name ?? meta.code_type_label}` : "")
+        + (slotMacro !== null
+          // G19B: the macro overlay wins the effective-type wording (the
+          // freshly assigned macro may not be in the keystate payload yet).
+          ? ` · macro ${macroLabel(slotMacro)} (stored in this profile)`
+          : (meta ? ` · ${meta.type_name ?? meta.code_type_label}` : ""))
         + (meta && meta.cell_active ? " · cell active" : "")
         + (dirty ? " · unsaved change" : "")
         // G19A: name the bottom-face tint explicitly — it is a locally
@@ -1540,7 +1766,12 @@ function renderKeymapGrid() {
 function renderKeymapCodeList() {
   if (!km.codeList) return;
   const query = km.search && km.search.value ? km.search.value : "";
-  const entries = keymapCodes().filter((entry) => keyEntryMatches(entry, query));
+  // G19B: the drawer's "Macros" category (M1..M10, built from the LOCAL
+  // STORE mirror — never a device read) joins the same grouped, searchable
+  // list; the "macro" group renders LAST (KEYMAP_GROUP_ORDER).
+  const entries = keymapCodes()
+    .concat(macroDrawerEntries(state.macros))
+    .filter((entry) => keyEntryMatches(entry, query));
   keymap.codeMatches = entries;
   keymap.codeCursor = clamp(keymap.codeCursor, 0, Math.max(entries.length - 1, 0));
   km.codeList.innerHTML = "";
@@ -1566,12 +1797,28 @@ function renderKeymapCodeList() {
     heading.textContent = KEYMAP_GROUP_LABELS[group] || group;
     km.codeList.appendChild(heading);
     for (const entry of byGroup.get(group)) {
+      const isMacro = Boolean(entry.macro);
       const item = document.createElement("div");
       item.className = "keymap-code-item";
       item.setAttribute("role", "option");
-      item.dataset.code = String(entry.code);
+      if (isMacro) {
+        // G19B: a macro entry carries a DOT BADGE instead of a hex code —
+        // filled only when the macro has stored content. Empty macros render
+        // disabled: the server refuses to assign contentless macros, so the
+        // drawer never offers them as live targets.
+        item.classList.add("keymap-macro-item");
+        item.dataset.macro = String(entry.macroId);
+        item.classList.toggle("is-disabled", !entry.filled);
+      } else {
+        item.dataset.code = String(entry.code);
+      }
       item.dataset.index = String(index);
-      const isCurrent = entry.code === current;
+      const isCurrent = isMacro
+        // The keystate payload can lag a fresh assignment — macroForSlot
+        // (the local store mirror) is the truth for the highlight.
+        ? keymap.selectedSlot != null
+          && macroForSlot(keymap.selectedSlot) === entry.macroId
+        : entry.code === current;
       item.classList.toggle("is-current", isCurrent);
       item.setAttribute("aria-selected", isCurrent ? "true" : "false");
       if (index === keymap.codeCursor) {
@@ -1581,13 +1828,25 @@ function renderKeymapCodeList() {
       const nameEl = document.createElement("span");
       nameEl.className = "keymap-code-name";
       nameEl.textContent = entry.name.replace(/ \(0x[0-9A-Fa-f]{2}\)$/, "");
-      const hexEl = document.createElement("span");
-      hexEl.className = "keymap-code-hex";
-      hexEl.textContent = keycodeHex(entry.code); // G18 F1
-      item.append(nameEl, hexEl);
-      item.title = entry.aliases && entry.aliases.length
-        ? `${entry.name} — search: ${entry.aliases.join(", ")}`
-        : entry.name;
+      if (isMacro) {
+        const dotEl = document.createElement("span");
+        dotEl.className = "macro-dot";
+        dotEl.classList.toggle("is-filled", entry.filled);
+        item.append(nameEl, dotEl);
+      } else {
+        const hexEl = document.createElement("span");
+        hexEl.className = "keymap-code-hex";
+        hexEl.textContent = keycodeHex(entry.code); // G18 F1
+        item.append(nameEl, hexEl);
+      }
+      item.title = isMacro
+        ? (entry.filled
+          ? `${entry.name} — stored on this computer; assign it to this `
+            + "keycap, then press Apply to write it to the board"
+          : `${entry.name} has no content yet — save it in the Macro Editor first`)
+        : (entry.aliases && entry.aliases.length
+          ? `${entry.name} — search: ${entry.aliases.join(", ")}`
+          : entry.name);
       km.codeList.appendChild(item);
       index += 1;
     }
@@ -1605,8 +1864,18 @@ function moveKeymapCursor(delta) {
 // Stage an assignment: dirty dot + "N unsaved changes" + write button all
 // update immediately through setBufferCode (nothing is written to the device
 // until the operator presses the write button).
-function stageKeymapCode(code) {
+async function stageKeymapCode(code) {
   if (!Number.isInteger(code)) return;
+  const slot = keymap.selectedSlot;
+  // G19B: picking a NORMAL key for a macro-assigned cap replaces the macro
+  // assignment NOW — assignments are immediate store writes (like every
+  // other macro op) — otherwise the wire-time macro rule (type 0x05 wins at
+  // assigned slots, applied LAST) would keep overriding the staged code at
+  // Apply. The code itself stays staged until Apply, exactly as before.
+  if (slot != null && macroForSlot(slot) !== null) {
+    const cleared = await clearMacroAssignment(slot);
+    if (!cleared) return; // store refused — stage nothing, say nothing dirty
+  }
   setBufferCode(code);
 }
 
@@ -1634,7 +1903,21 @@ function renderKeymapEditor() {
   if (unassigned) return;
   setText(km.editorCurrent, keymapCodeName(keymap.buffer[slot]));
   setText(km.editorFactory, meta ? keymapCodeName(meta.factory_code) : "—");
-  setText(km.editorType, meta ? meta.code_type_label : "—");
+  // G19B: an assigned macro wins the TYPE line (the wire carries type 0x05
+  // at this slot; macro rules are applied LAST), and gets its own honest
+  // hint. The keystate meta stays raw-code truth — the code line above is
+  // the key stored FOR this slot, the macro is an overlay, not a rewrite.
+  const macroId = macroForSlot(slot);
+  setText(km.editorType, macroId !== null ? "macro" : (meta ? meta.code_type_label : "—"));
+  if (km.editorMacro) {
+    if (macroId !== null) {
+      setText(km.editorMacro,
+        `${macroLabel(macroId)} assigned (stored on this computer) — `
+        + "press Apply to write it to the board. Picking a normal key below "
+        + "replaces the assignment.");
+    }
+    toggleHidden(km.editorMacro, macroId === null);
+  }
   renderKeymapCodeList();
   if (km.revertKey) km.revertKey.disabled = !meta;
   if (km.unassignKey) km.unassignKey.disabled = false;
@@ -1695,7 +1978,10 @@ function setBufferCode(code) {
 
 async function writeKeymapBuffer() {
   const count = keymapDirtyCount();
-  if (!keymapIsEditable() || count === 0) return;
+  // G19B: a macros-only Apply is legitimate — same path, whole buffer POSTed
+  // (zero key diffs = the same matrix bytes) while the server stages every
+  // stored macro (0x04 table + 0x05 data) after the matrix write.
+  if (!keymapIsEditable() || (count === 0 && !macro.dirty)) return;
   // G12: snapshot the first dirty slot + its target code BEFORE the write
   // resets the baseline, so the matcher arms against the code we just wrote.
   const verifySlot = firstDirtyKeymapSlot();
@@ -1707,6 +1993,9 @@ async function writeKeymapBuffer() {
   const payload = await postAction("apply-keymap", { codes: keymap.buffer.slice() });
   keymap.busy = false;
   if (payload.ok) {
+    // G19B: this write staged every stored macro too (server apply order:
+    // bind → matrix → 0x04 → 0x05 → re-assert) — macros are on the board.
+    macro.dirty = false;
     await fetchKeystate();
     paintKeymapWriteBanner(payload); // G16: after the resettable keystate repaint
     if (verifySlot != null && verifyExpect && verifyExpect.length) {
@@ -1730,6 +2019,9 @@ async function resetKeymapActiveProfile() {
   const payload = await postAction("reset-keymap", null);
   keymap.busy = false;
   if (payload.ok) {
+    // G19B: the reset path stages stored macros as well (library stays,
+    // assignments were cleared server-side) — nothing macro is pending now.
+    macro.dirty = false;
     await fetchKeystate();
     paintKeymapWriteBanner(payload); // G16: the reset names its profile too
   } else {
@@ -1840,12 +2132,31 @@ if (km.importButton && km.importFile) {
   });
 }
 if (km.revertKey) {
-  km.revertKey.addEventListener("click", () => {
-    const meta = keymap.selectedSlot == null ? null : keymapSlotMeta(keymap.selectedSlot);
-    if (meta) setBufferCode(meta.factory_code);
+  km.revertKey.addEventListener("click", async () => {
+    const slot = keymap.selectedSlot;
+    const meta = slot == null ? null : keymapSlotMeta(slot);
+    if (!meta) return;
+    // G19B: reverting a macro-assigned cap must drop the assignment too —
+    // the wire-time macro rule is unconditional at assigned slots, so the
+    // factory code alone would never reach the board.
+    if (macroForSlot(slot) !== null) {
+      const cleared = await clearMacroAssignment(slot);
+      if (!cleared) return;
+    }
+    setBufferCode(meta.factory_code);
   });
 }
-if (km.unassignKey) km.unassignKey.addEventListener("click", () => setBufferCode(0xFF));
+// G19B: Unassign clears a macro assignment first for the same reason.
+if (km.unassignKey) {
+  km.unassignKey.addEventListener("click", async () => {
+    const slot = keymap.selectedSlot;
+    if (slot != null && macroForSlot(slot) !== null) {
+      const cleared = await clearMacroAssignment(slot);
+      if (!cleared) return;
+    }
+    setBufferCode(0xFF);
+  });
+}
 if (km.search) {
   km.search.addEventListener("input", () => {
     keymap.codeCursor = 0;
@@ -1864,7 +2175,14 @@ if (km.search) {
     } else if (event.key === "Enter") {
       event.preventDefault();
       const entry = keymap.codeMatches[keymap.codeCursor];
-      if (entry) stageKeymapCode(entry.code);
+      if (!entry) return;
+      // G19B: keyboard selection reaches the Macros category too; empty
+      // macros are not assignable (mirrors the disabled click target).
+      if (entry.macro) {
+        if (entry.filled) assignMacroToSelectedSlot(entry.macroId);
+      } else {
+        stageKeymapCode(entry.code);
+      }
     }
   });
 }
@@ -1876,6 +2194,14 @@ if (km.codeList) {
     const item = event.target.closest(".keymap-code-item");
     if (!item) return;
     event.preventDefault();
+    if (item.classList.contains("is-disabled")) return; // empty macro
+    if (item.dataset.macro !== undefined) {
+      // G19B: a Macro-category pick assigns the selected cap to that
+      // MacroID (immediate store write; the board learns it at Apply).
+      assignMacroToSelectedSlot(Number.parseInt(item.dataset.macro, 10));
+      if (km.search) km.search.focus();
+      return;
+    }
     const code = Number.parseInt(item.dataset.code, 10);
     if (!Number.isNaN(code)) stageKeymapCode(code);
     if (km.search) km.search.focus();
@@ -1922,6 +2248,520 @@ scrollAppToTop();
 window.requestAnimationFrame(scrollAppToTop);
 window.addEventListener("load", scrollAppToTop);
 
+// ---------------------------------------------------------------------------
+// G19B: Macro Editor + drawer Macros category.
+//
+// HONESTY (plan, non-negotiable): this keyboard CANNOT report macros back —
+// the LOCAL STORE is the truth, and every string in this module says "on
+// this computer / in this profile", never "read from the keyboard" (the
+// Windows CORE behaves the same way). Nothing here writes to the device:
+// saving/assigning hits the store-only /api/macro/* routes; the board learns
+// everything at Apply, where the server stages 0x04 (type table) + 0x05
+// (macro data, MacroID order) after the matrix write.
+//
+// RECORDING (plan, documented behaviour): window-level capture while Record
+// is on — every non-modifier keydown/keyup counts, even one typed into a
+// text field, because the browser cannot scope key events to one widget.
+// e.repeat is dropped; modifier keys are IGNORED (the OS intercepts chords,
+// so a "modifier step" could never replay faithfully from page events).
+// Escape stops recording without becoming a step. Each step emits its
+// change THEN waits `delay`, so a gap becomes the PREVIOUS step's delay;
+// the last step keeps the 50 ms default (the wait after the final event is
+// unknowable until the next one) for the operator to edit. While recording,
+// the G12 keydown logger stays silent (see its guard) and every editable
+// control in the panel is disabled.
+// ---------------------------------------------------------------------------
+
+const macroEl = {
+  list: document.getElementById("macro-list"),
+  stateChip: document.getElementById("macro-state-chip"),
+  apply: document.getElementById("macro-apply"),
+  empty: document.getElementById("macro-editor-empty"),
+  editor: document.getElementById("macro-editor"),
+  title: document.getElementById("macro-editor-title"),
+  repeatGroup: document.getElementById("macro-repeat-group"),
+  steps: document.getElementById("macro-steps"),
+  stepsEmpty: document.getElementById("macro-steps-empty"),
+  stepCount: document.getElementById("macro-step-count"),
+  record: document.getElementById("macro-record"),
+  recordStatus: document.getElementById("macro-record-status"),
+  stepKey: document.getElementById("macro-step-key"),
+  stepDown: document.getElementById("macro-step-down"),
+  stepDelay: document.getElementById("macro-step-delay"),
+  stepAdd: document.getElementById("macro-step-add"),
+  save: document.getElementById("macro-save"),
+  status: document.getElementById("macro-status"),
+};
+
+const macro = {
+  selectedId: null,
+  draft: null, // {name, repeat, steps: [{down, code, delay}]}
+  recording: false,
+  lastTs: 0,
+  dirty: false, // store changes (save/delete/assign) waiting for Apply
+  busy: false, // a /api/macro/* request is in flight
+};
+
+// Slot -> MacroID from the LOCAL mirror (digit-string keys), or null.
+function macroForSlot(slot) {
+  const raw = state.macroSlots ? state.macroSlots[String(slot)] : undefined;
+  return raw === undefined || raw === null ? null : Number(raw);
+}
+
+function setMacroStatus(text) {
+  setText(macroEl.status, text || "");
+}
+
+function setMacroRecordStatus(text) {
+  setText(macroEl.recordStatus, text || "");
+}
+
+// POST a store-only macro route (FLAT JSON body — unlike the {value:...}
+// per-key routes). Success responses carry fresh macros/macro_slots at the
+// TOP LEVEL; applyPayload is NOT used (these payloads have no state/devices
+// and would wipe the device list), so the mirror is updated by hand.
+async function postMacroRoute(path, body) {
+  if (macro.busy) return { ok: false, message: "Another macro operation is in flight." };
+  macro.busy = true;
+  renderMacroPanel();
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (payload && typeof payload === "object" && payload.macros) {
+      state.macros = payload.macros;
+      state.macroSlots = payload.macro_slots || {};
+    }
+    if (payload && payload.ok) macro.dirty = true;
+    return payload;
+  } catch (error) {
+    return { ok: false, message: `Macro request failed: ${error}` };
+  } finally {
+    macro.busy = false;
+    renderMacroPanel();
+    renderKeymapGrid();
+    renderKeymapEditor();
+    renderKeymapMeta();
+    renderKeymapCodeList(); // drawer dots / is-current follow the store
+  }
+}
+
+function macroDraftDirty() {
+  if (macro.selectedId === null || !macro.draft) return false;
+  const entry = state.macros[String(macro.selectedId)];
+  const stored = entry && Array.isArray(entry.events) ? entry.events : [];
+  if (macro.draft.steps.length !== stored.length) return true;
+  if (macro.draft.name !== (entry && typeof entry.name === "string" ? entry.name : "")) {
+    return true;
+  }
+  const storedRepeat = entry && Number.isInteger(entry.repeat) ? entry.repeat : 0;
+  if (macro.draft.repeat !== storedRepeat) return true;
+  for (let i = 0; i < macro.draft.steps.length; i += 1) {
+    const a = macro.draft.steps[i];
+    const b = stored[i] || {};
+    if (a.down !== Boolean(b.down) || a.code !== (Number(b.code) | 0)
+      || a.delay !== (Number(b.delay) | 0)) return true;
+  }
+  return false;
+}
+
+function selectMacro(id) {
+  if (macro.recording || macro.busy) return; // keyboard belongs to the recorder
+  if (macro.selectedId === id) return; // keep an in-progress draft
+  if (macroDraftDirty()
+    && !window.confirm(`Discard unsaved edits to ${macroLabel(macro.selectedId)}?`)) {
+    return;
+  }
+  const entry = state.macros[String(id)];
+  macro.selectedId = id;
+  macro.draft = {
+    name: entry && typeof entry.name === "string" ? entry.name : "",
+    repeat: entry && Number.isInteger(entry.repeat) ? entry.repeat : 0,
+    steps: (entry && Array.isArray(entry.events) ? entry.events : []).map((e) => ({
+      down: Boolean(e.down),
+      code: Number(e.code) | 0,
+      delay: Number(e.delay) | 0,
+    })),
+  };
+  setMacroStatus("");
+  setMacroRecordStatus("");
+  renderMacroPanel();
+}
+
+function commitMacroName(id, inputEl) {
+  if (macro.busy || macro.recording) return;
+  const name = inputEl.value.trim();
+  const entry = state.macros[String(id)];
+  const editing = macro.selectedId === id && macro.draft;
+  if (editing) macro.draft.name = name;
+  const repeat = editing ? macro.draft.repeat : (entry ? entry.repeat : 0);
+  const steps = editing
+    ? macro.draft.steps
+    : (entry && Array.isArray(entry.events) ? entry.events : []);
+  if (steps.length === 0) {
+    // The store keeps name+events as ONE unit — a name alone cannot exist
+    // for an empty macro. Revert honestly instead of pretending.
+    inputEl.value = entry && typeof entry.name === "string" ? entry.name : "";
+    setMacroStatus(`${macroLabel(id)} has no steps yet — steps come first, `
+      + "the name rides with them on Save.");
+    return;
+  }
+  postMacroRoute("/api/macro/save",
+    buildMacroSavePayload(id, name || macroLabel(id), repeat, steps))
+    .then((payload) => setMacroStatus(payload.message || ""));
+}
+
+async function assignMacroToSelectedSlot(id) {
+  if (macro.busy || macro.recording || !Number.isInteger(id)) return;
+  const slot = keymap.selectedSlot;
+  if (slot == null) {
+    setText(els.statusMessage, "Select a keycap in the Remap grid first, "
+      + "then pick a macro for it.");
+    return;
+  }
+  const payload = await postMacroRoute("/api/macro/assign", { slot, id });
+  setText(els.statusMessage, payload.message || "");
+  if (payload.ok) renderKeymapEditor();
+}
+
+// Clear one slot's assignment (immediate store write). Returns true only
+// when the store confirms — callers that piggy-back a code change on this
+// (stage/revert/unassign) must NOT stage when the clear failed.
+async function clearMacroAssignment(slot) {
+  const payload = await postMacroRoute("/api/macro/assign", { slot, id: null });
+  setText(els.statusMessage, payload.message || "");
+  return Boolean(payload.ok);
+}
+
+function deleteMacro(id) {
+  if (macro.busy || macro.recording) return;
+  const entry = state.macros[String(id)];
+  const steps = entry && Array.isArray(entry.events) ? entry.events.length : 0;
+  const uses = macroUseCount(state.macroSlots, id);
+  const note = uses
+    ? ` ${macroUseLabel(uses)}; those keys revert to their stored key on the next Apply.`
+    : "";
+  if (!window.confirm(`Delete ${macroNameOrLabel(state.macros, id)} `
+    + `(${steps} step(s)) from this computer?${note}`)) {
+    return;
+  }
+  postMacroRoute("/api/macro/delete", { id }).then((payload) => {
+    setMacroStatus(payload.message || "");
+    if (payload.ok && macro.selectedId === id) {
+      macro.selectedId = null;
+      macro.draft = null;
+      renderMacroPanel();
+    }
+  });
+}
+
+function saveMacro() {
+  if (macro.selectedId === null || !macro.draft || macro.busy || macro.recording) return;
+  const steps = macro.draft.steps;
+  if (steps.length === 0) {
+    setMacroStatus("Add at least one step first — this board stores 1–82 steps per macro.");
+    return;
+  }
+  for (let i = 0; i < steps.length; i += 1) {
+    const d = steps[i].delay;
+    if (!Number.isInteger(d) || d < 1 || d > 65535) {
+      // Deliberate REJECT, not a silent rewrite: the store refuses delay 0
+      // (plan) and the UI must not pretend a fixed-up value was saved.
+      setMacroStatus(`Step ${i + 1}: delay must be a whole number 1..65535 ms — `
+        + "nothing was saved.");
+      return;
+    }
+  }
+  const payload = buildMacroSavePayload(
+    macro.selectedId,
+    macro.draft.name.trim() || macroLabel(macro.selectedId),
+    macro.draft.repeat,
+    steps,
+  );
+  postMacroRoute("/api/macro/save", payload).then((result) => {
+    setMacroStatus(result.message || "");
+    if (result.ok) {
+      const stored = state.macros[String(macro.selectedId)];
+      if (stored && typeof stored.name === "string") macro.draft.name = stored.name;
+      renderMacroPanel();
+    }
+  });
+}
+
+function setMacroRecording(on) {
+  if (on) {
+    if (macro.selectedId === null || !macro.draft || macro.busy) return;
+    macro.recording = true;
+    macro.lastTs = performance.now();
+    setMacroRecordStatus("Recording — every non-modifier key you press adds a "
+      + "step (modifiers are ignored). Escape or Record again stops.");
+  } else {
+    macro.recording = false;
+    const n = macro.draft ? macro.draft.steps.length : 0;
+    setMacroRecordStatus(n ? `Recorded ${n} step(s) so far — press Save macro `
+      + "when the list is right." : "");
+  }
+  renderMacroPanel();
+}
+
+function macroRecordEvent(evt, down) {
+  if (!macro.recording || !macro.draft) return;
+  if (evt.key === "Escape") {
+    evt.preventDefault();
+    setMacroRecording(false); // Escape stops; it never becomes a step
+    return;
+  }
+  if (isRecordingIgnoredKey(evt)) return; // e.repeat + modifiers (plan)
+  const code = browserCodeToHid(evt.code);
+  if (code === null) return; // name not in the HID table — nothing to encode
+  evt.preventDefault(); // keys are RECORDING INPUT, not page actions
+  const steps = macro.draft.steps;
+  if (steps.length >= MACRO_MAX_STEPS) {
+    setMacroRecording(false);
+    setMacroRecordStatus(`Step limit ${MACRO_MAX_STEPS} reached (248 bytes / 3) `
+      + "— recording stopped.");
+    return;
+  }
+  const now = performance.now();
+  if (steps.length) {
+    // The gap elapsed SINCE the previous event becomes that step's delay:
+    // a step emits its change, THEN waits (plan semantics).
+    steps[steps.length - 1].delay = recordStepDelta(macro.lastTs, now);
+  }
+  steps.push({ down: down, code: code, delay: MACRO_STEP_DEFAULT_DELAY });
+  macro.lastTs = now;
+  renderMacroSteps();
+}
+
+window.addEventListener("keydown", (event) => macroRecordEvent(event, true));
+window.addEventListener("keyup", (event) => macroRecordEvent(event, false));
+
+// "Add step" key catalog: the SAME catalog the drawer remaps from
+// (keymap.codes — no invented codes; media keys ride along only because
+// they are already in the table).
+function populateMacroStepCatalog() {
+  if (!macroEl.stepKey || macroEl.stepKey.options.length > 0) return;
+  const codes = keymapCodes();
+  if (!codes.length) return;
+  const byGroup = new Map();
+  for (const entry of codes) {
+    if (!byGroup.has(entry.group)) byGroup.set(entry.group, []);
+    byGroup.get(entry.group).push(entry);
+  }
+  for (const group of KEYMAP_GROUP_ORDER) {
+    if (!byGroup.has(group)) continue;
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = KEYMAP_GROUP_LABELS[group] || group;
+    for (const entry of byGroup.get(group)) {
+      const option = document.createElement("option");
+      option.value = String(entry.code);
+      option.textContent = entry.name.replace(/ \(0x[0-9A-Fa-f]{2}\)$/, "");
+      optgroup.appendChild(option);
+    }
+    macroEl.stepKey.appendChild(optgroup);
+  }
+  const first = macroEl.stepKey.options[0];
+  if (first) macroEl.stepKey.value = first.value;
+}
+
+function renderMacroSteps() {
+  if (!macroEl.steps) return;
+  macroEl.steps.innerHTML = "";
+  const steps = macro.draft ? macro.draft.steps : [];
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i];
+    const row = document.createElement("div");
+    row.className = "macro-step-row";
+    const idx = document.createElement("span");
+    idx.className = "macro-step-index";
+    idx.textContent = String(i + 1);
+    const keyEl = document.createElement("span");
+    keyEl.className = "macro-step-key";
+    keyEl.textContent = keymapCodeName(step.code);
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = `macro-step-pill ${step.down ? "is-down" : "is-up"}`;
+    pill.textContent = step.down ? "Down" : "Up";
+    pill.title = step.down ? "This step presses the key down — click for Up"
+      : "This step releases the key — click for Down";
+    pill.disabled = macro.recording;
+    pill.addEventListener("click", () => {
+      step.down = !step.down;
+      renderMacroSteps();
+    });
+    const delay = document.createElement("input");
+    delay.type = "number";
+    delay.min = "1";
+    delay.max = "65535";
+    delay.step = "1";
+    delay.className = "macro-step-delay";
+    delay.value = String(step.delay);
+    delay.title = "Milliseconds to wait AFTER emitting this step (1..65535)";
+    delay.disabled = macro.recording;
+    delay.addEventListener("change", () => {
+      const raw = Number(delay.value);
+      if (!Number.isInteger(raw) || raw < 1 || raw > 65535) {
+        delay.value = String(step.delay);
+        setMacroStatus("Delay must be a whole number 1..65535 ms — 0 is "
+          + "rejected, never rewritten.");
+        return;
+      }
+      step.delay = raw;
+      delay.value = String(raw);
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "macro-step-remove";
+    remove.textContent = "×";
+    remove.title = `Remove step ${i + 1}`;
+    remove.disabled = macro.recording;
+    remove.addEventListener("click", () => {
+      steps.splice(i, 1);
+      renderMacroSteps();
+    });
+    row.append(idx, keyEl, pill, delay, remove);
+    macroEl.steps.appendChild(row);
+  }
+  setText(macroEl.stepCount, `${steps.length}/${MACRO_MAX_STEPS}`);
+  toggleHidden(macroEl.stepsEmpty, steps.length > 0);
+}
+
+function renderMacroPanel() {
+  if (!macroEl.list) return;
+  macroEl.list.innerHTML = "";
+  let stored = 0;
+  for (let id = 0; id < MACRO_ID_COUNT; id += 1) {
+    const entry = state.macros[String(id)];
+    const filled = macroHasContent(entry);
+    if (filled) stored += 1;
+    const row = document.createElement("div");
+    row.className = "macro-row";
+    row.dataset.id = String(id);
+    row.setAttribute("role", "option");
+    row.classList.toggle("is-active", macro.selectedId === id);
+    const dot = document.createElement("span");
+    dot.className = "macro-dot";
+    if (filled) dot.classList.add("is-filled");
+    dot.title = filled ? "has stored content" : "empty";
+    const nameIn = document.createElement("input");
+    nameIn.className = "macro-row-name";
+    nameIn.type = "text";
+    nameIn.maxLength = 24;
+    nameIn.value = entry && typeof entry.name === "string" ? entry.name : "";
+    nameIn.placeholder = macroLabel(id);
+    nameIn.setAttribute("aria-label", `${macroLabel(id)} name`);
+    nameIn.disabled = macro.recording
+      || (!filled && !(macro.selectedId === id && macro.draft
+        && macro.draft.steps.length > 0));
+    nameIn.addEventListener("change", () => commitMacroName(id, nameIn));
+    nameIn.addEventListener("click", (event) => event.stopPropagation());
+    const use = document.createElement("span");
+    use.className = "macro-row-use";
+    use.textContent = macroUseLabel(macroUseCount(state.macroSlots, id));
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "macro-row-delete";
+    del.textContent = "Delete";
+    del.disabled = !filled || macro.recording || macro.busy;
+    del.title = filled
+      ? `Delete ${macroLabel(id)} from this computer`
+      : "Nothing stored for this macro yet";
+    del.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteMacro(id);
+    });
+    row.append(dot, nameIn, use, del);
+    row.addEventListener("click", () => selectMacro(id));
+    macroEl.list.appendChild(row);
+  }
+  // Header chip: the honest store state (never "on the keyboard").
+  setText(macroEl.stateChip, macro.dirty
+    ? "macros waiting for Apply"
+    : (stored === 1
+      ? "1 macro stored on this computer"
+      : (stored > 1
+        ? `${stored} macros stored on this computer`
+        : "no macros stored yet")));
+  if (macroEl.stateChip) macroEl.stateChip.classList.toggle("is-pending", macro.dirty);
+  // Clear visual Apply-affordance (plan) while store changes await Apply —
+  // same action as the Remap panel's write button (one apply path).
+  toggleHidden(macroEl.apply, !macro.dirty || macro.recording);
+  if (macroEl.apply) macroEl.apply.disabled = macro.busy || !keymapIsEditable();
+
+  const hasEditor = macro.selectedId !== null && macro.draft !== null;
+  toggleHidden(macroEl.editor, !hasEditor);
+  toggleHidden(macroEl.empty, hasEditor);
+  if (!hasEditor) return;
+  const draft = macro.draft;
+  const name = draft.name.trim();
+  setText(macroEl.title, name ? `${macroLabel(macro.selectedId)} · ${name}`
+    : macroLabel(macro.selectedId));
+  if (macroEl.repeatGroup) {
+    for (const input of macroEl.repeatGroup.querySelectorAll('input[name="macro-repeat"]')) {
+      input.checked = Number.parseInt(input.value, 10) === draft.repeat;
+      input.disabled = macro.recording || macro.busy;
+    }
+  }
+  if (macroEl.record) {
+    macroEl.record.textContent = macro.recording ? "Stop recording" : "Record";
+    macroEl.record.classList.toggle("is-recording", macro.recording);
+    macroEl.record.disabled = macro.busy;
+  }
+  for (const el of [macroEl.stepKey, macroEl.stepDown, macroEl.stepDelay, macroEl.stepAdd]) {
+    if (el) el.disabled = macro.recording || macro.busy;
+  }
+  if (macroEl.stepKey && macroEl.stepKey.options.length === 0) {
+    populateMacroStepCatalog();
+    for (const el of [macroEl.stepKey, macroEl.stepDown, macroEl.stepDelay, macroEl.stepAdd]) {
+      if (el) el.disabled = macro.recording || macro.busy || macroEl.stepKey.options.length === 0;
+    }
+  }
+  if (macroEl.save) macroEl.save.disabled = macro.recording || macro.busy;
+  renderMacroSteps();
+}
+
+if (macroEl.record) {
+  macroEl.record.addEventListener("click", () => setMacroRecording(!macro.recording));
+}
+if (macroEl.stepAdd) {
+  macroEl.stepAdd.addEventListener("click", () => {
+    if (!macro.draft || macro.recording || macro.busy) return;
+    if (macro.draft.steps.length >= MACRO_MAX_STEPS) {
+      setMacroStatus(`Step limit ${MACRO_MAX_STEPS} reached — remove a step first.`);
+      return;
+    }
+    const code = Number.parseInt(macroEl.stepKey.value, 10);
+    if (Number.isNaN(code)) {
+      setMacroStatus("The key catalog has not loaded yet — try again in a moment.");
+      return;
+    }
+    const raw = Number(macroEl.stepDelay.value);
+    if (!Number.isInteger(raw) || raw < 1 || raw > 65535) {
+      setMacroStatus("Delay must be a whole number 1..65535 ms.");
+      return;
+    }
+    macro.draft.steps.push({
+      down: macroEl.stepDown.value === "1",
+      code: code,
+      delay: raw,
+    });
+    setMacroStatus("");
+    renderMacroSteps();
+  });
+}
+if (macroEl.save) macroEl.save.addEventListener("click", saveMacro);
+if (macroEl.apply) macroEl.apply.addEventListener("click", writeKeymapBuffer);
+if (macroEl.repeatGroup) {
+  macroEl.repeatGroup.addEventListener("change", () => {
+    if (!macro.draft || macro.recording) return;
+    const checked = macroEl.repeatGroup.querySelector('input[name="macro-repeat"]:checked');
+    if (checked) macro.draft.repeat = Number.parseInt(checked.value, 10) || 0;
+  });
+}
+
 fetchState().catch((error) => {
   setText(els.statusMessage, `Failed to load state: ${error}`);
   setText(els.statusPill, "Error");
@@ -1936,5 +2776,10 @@ fetchKeystate();
 // listener must never throw into the UI.
 document.addEventListener("keydown", (event) => {
   if (!event || !event.code) return;
+  // G19B: while the Macro Editor's Record toggle is on, keydowns here are
+  // MACRO RECORDING INPUT, not keystrokes reaching the board — the G12
+  // armed matcher must not see them (a recorded "A" could otherwise match
+  // an armed remap verdict). The recorder below owns the keyboard instead.
+  if (macro.recording) return;
   postKeyEvent(event.code, event.key);
 });

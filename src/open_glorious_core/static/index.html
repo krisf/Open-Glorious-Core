@@ -316,6 +316,9 @@
                                         <dd id="keymap-editor-type">—</dd>
                                     </div>
                                 </dl>
+                                <!-- G19B: this cap carries a macro (local store truth —
+                                     the board cannot report macros back). -->
+                                <p id="keymap-editor-macro" class="keymap-macro-hint is-hidden" role="status"></p>
                                 <label class="keymap-editor-select">
                                     <span>Remap to</span>
                                     <input id="keymap-search" type="text" placeholder="Search keys, aliases, 0x59…"
@@ -339,6 +342,95 @@
                                 </div>
                             </div>
                         </aside>
+                    </div>
+                </section>
+
+                <!-- G19B: Macro Editor. The LOCAL STORE is the source of truth for
+                     macros — this keyboard cannot report macros back (live evidence,
+                     2026-11-15), so everything shown here reflects what THIS app
+                     saved, never a device read. Nothing reaches the board until the
+                     operator presses Apply (the keymap write path also stages the
+                     macro reports, in MacroID order). -->
+                <section id="macro-section" class="panel control-panel macro-panel">
+                    <div class="panel-heading macro-head">
+                        <div>
+                            <p class="surface-kicker">Macros</p>
+                            <h3>Macro Editor</h3>
+                        </div>
+                        <div class="macro-head-actions">
+                            <span id="macro-state-chip" class="keymap-dirty-counter">no macros stored yet</span>
+                            <button id="macro-apply" class="button keymap-write-pending is-hidden" type="button"
+                                title="Same Apply as the Remap panel: writes the key matrix plus every stored macro to the keyboard.">
+                                Write macros to keyboard</button>
+                        </div>
+                    </div>
+                    <div class="macro-layout">
+                        <div class="macro-list-col">
+                            <p class="macro-col-kicker">Macro keys (M1–M10)</p>
+                            <div id="macro-list" class="macro-list" role="listbox" aria-label="Macros"></div>
+                            <p class="macro-col-hint">A filled dot means the macro has content. Names, steps and
+                                assignments are stored on this computer — the board has no macro readback.</p>
+                        </div>
+                        <div class="macro-editor-col">
+                            <p id="macro-editor-empty" class="macro-empty-note">Select M1–M10 on the left to edit
+                                its repeat mode and steps.</p>
+                            <div id="macro-editor" class="macro-editor is-hidden">
+                                <div class="macro-editor-head">
+                                    <p class="surface-kicker">Editing macro</p>
+                                    <h4 id="macro-editor-title">—</h4>
+                                </div>
+                                <p class="macro-steps-kicker">Repeat mode</p>
+                                <div id="macro-repeat-group" class="macro-repeat-grid" role="radiogroup"
+                                    aria-label="Repeat mode">
+                                    <label class="macro-repeat-option">
+                                        <input type="radio" name="macro-repeat" value="0">
+                                        <span><strong>No Repeat</strong><small>Plays the steps once per key
+                                                press.</small></span>
+                                    </label>
+                                    <label class="macro-repeat-option">
+                                        <input type="radio" name="macro-repeat" value="1">
+                                        <span><strong>Repeat While Holding</strong><small>Loops while the key stays
+                                                pressed.</small></span>
+                                    </label>
+                                    <label class="macro-repeat-option">
+                                        <input type="radio" name="macro-repeat" value="2">
+                                        <span><strong>Toggle</strong><small>Starts on press; presses again to
+                                                stop.</small></span>
+                                    </label>
+                                </div>
+                                <p class="macro-steps-kicker">Steps <span id="macro-step-count"
+                                        class="macro-step-count"></span></p>
+                                <div id="macro-steps" class="macro-steps" aria-label="Macro steps"></div>
+                                <p id="macro-steps-empty" class="macro-steps-empty is-hidden">No steps yet —
+                                    press Record or add one below (max 82).</p>
+                                <div class="macro-toolbar">
+                                    <button id="macro-record" class="button button-secondary" type="button"
+                                        title="Captures every key you press (browser-level; modifier keys are ignored, repeats are dropped). Press again to stop.">Record</button>
+                                    <span id="macro-record-status" class="macro-record-status" role="status"></span>
+                                </div>
+                                <div class="macro-add-step">
+                                    <label class="macro-add-key"><span>Add step</span>
+                                        <select id="macro-step-key" aria-label="Step key"></select>
+                                    </label>
+                                    <select id="macro-step-down" aria-label="Step direction">
+                                        <option value="1">Down</option>
+                                        <option value="0">Up</option>
+                                    </select>
+                                    <label class="macro-add-delay"><span>Delay ms</span>
+                                        <input id="macro-step-delay" type="number" min="1" max="65535" step="1"
+                                            value="50">
+                                    </label>
+                                    <button id="macro-step-add" class="button button-secondary" type="button">Add
+                                        step</button>
+                                </div>
+                                <div class="macro-editor-commit">
+                                    <button id="macro-save" class="button" type="button">Save macro</button>
+                                    <span id="macro-status" class="macro-status" role="status"></span>
+                                </div>
+                            </div>
+                            <p class="macro-footer-note">Macros live in your profile; click Apply (top-right) to write
+                                them to the board.</p>
+                        </div>
                     </div>
                 </section>
 
