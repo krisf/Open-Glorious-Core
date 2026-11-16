@@ -15,7 +15,10 @@ truth, do NOT re-derive):
   = five zero bytes). Side LEDs are ordinary slots — no special encoding.
 * Vendor Apply order: properties 0x07 -> effect 0x02 -> layout pages
   0x06 x3 -> profile-update 0x01. Pages join the flow ONLY while per-key
-  mode is enabled.
+  mode is enabled; G19-FIX3 adds the EXIT: after a PERSISTED apply (flag
+  per_key["applied"], store-backed), a disable-Apply sends 3 ALL-ZERO
+  pages before the profile-update. Never enabled AND never applied: no
+  pages at all — the never-used default wire stays byte-identical.
 * There is NO LED/win-lock readback on this board (blank-shadow cmd-129
   mirror): the setters are local-mirror-only, the store is the source of
   truth, and imports stage without ever touching the device.
@@ -114,7 +117,12 @@ def _default_effect() -> bytes:
 def test_disabled_defaults_emit_exactly_the_head_reports_byte_identical(wired) -> None:
     backend, fake = wired
     assert backend.win_lock is False
-    assert backend.per_key == {"enabled": False, "brightness": 100, "slots": {}}
+    assert backend.per_key == {
+        "enabled": False,
+        "brightness": 100,
+        "slots": {},
+        "applied": False,
+    }
 
     backend._apply_current_state()
 
@@ -288,7 +296,10 @@ def test_enabled_apply_sends_properties_effect_pages_then_profile(wired) -> None
     assert pages[2][8 + 195 : 8 + 200] == bytes([0xFF, 119, 0, 0, 255])
 
 
-def test_disabling_again_removes_the_pages_from_the_flow(wired) -> None:
+def test_disabling_sends_one_zero_page_erase_then_the_pages_are_gone(wired) -> None:
+    """G19-FIX3 semantics: after a persisted Apply the disable-Apply must
+    erase the flash overlay ONCE (3 all-zero pages); every later Apply is
+    page-free again (and the default wire is byte-identical)."""
     backend, fake = wired
     backend.set_per_key_enabled(True)
     backend.per_key["slots"] = _few_slots()
@@ -297,8 +308,16 @@ def test_disabling_again_removes_the_pages_from_the_flow(wired) -> None:
     backend.set_per_key_enabled(False)
     fake.capture.clear()
     backend._apply_current_state()
-    assert [r[1] for r in fake.capture] == [0x07, 0x02, 0x01]
+    # the exit: 3 erase pages ride between effect and profile-update
+    assert [r[1] for r in fake.capture] == [0x07, 0x02, 0x06, 0x06, 0x06, 0x01]
     assert fake.capture[0] == _default_properties()
+    for page in _cmd_reports(fake, CMD_SET_LAYOUT):
+        assert page[8:208] == bytes(200), "erase pages are ALL-ZERO slots"
+    assert backend.per_key["applied"] is False
+    # and the overlay is gone: any later disable-Apply sends NO pages again
+    fake.capture.clear()
+    backend._apply_current_state()
+    assert [r[1] for r in fake.capture] == [0x07, 0x02, 0x01]
 
 
 # --- controller + store ---------------------------------------------------------
@@ -322,6 +341,8 @@ def test_win_lock_and_per_key_persist_to_the_local_store(fake_hid, monkeypatch) 
         "enabled": True,
         "brightness": 40,
         "slots": {"66": {"vis": "breath", "rgb": [12, 34, 56]}},
+        # no Apply happened — settings actions alone never set the flag
+        "applied": False,
     }
 
 
@@ -330,7 +351,12 @@ def test_get_state_exposes_win_lock_and_per_key_mirror(fake_hid, monkeypatch) ->
     state = controller.get_state()
     assert state["ok"] is True
     assert state["state"]["win_lock"] is False
-    assert state["state"]["per_key"] == {"enabled": False, "brightness": 100, "slots": {}}
+    assert state["state"]["per_key"] == {
+        "enabled": False,
+        "brightness": 100,
+        "slots": {},
+        "applied": False,
+    }
 
     backend.set_per_key_color(3, [1, 2, 3])
     state = controller.get_state()
@@ -423,7 +449,12 @@ def test_http_settings_routes_ok_and_400_and_zero_writes(fake_hid, monkeypatch) 
         # persisted round trip through the store
         settings = store.get_layer(store.load(), SERIAL, 1, 1)["settings"]
         assert settings["win_lock"] is True
-        assert settings["per_key"] == {"enabled": True, "brightness": 65, "slots": {}}
+        assert settings["per_key"] == {
+            "enabled": True,
+            "brightness": 65,
+            "slots": {},
+            "applied": False,
+        }
 
         with urllib.request.urlopen(base + "/api/state") as response:
             state = json.loads(response.read())

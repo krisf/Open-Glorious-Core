@@ -577,8 +577,19 @@ class StockGmmkProBackend(BaseBackend):
         # 2026-11-15: 256 zero bytes) — there is NO LED state readback, ever.
         # Shape (mirrored 1:1 into the store settings):
         #   {"enabled": bool, "brightness": 0..100,
-        #    "slots": {str(slot): {"vis": "off|lit|breath", "rgb": [r, g, b]}}}
-        self.per_key: dict = {"enabled": False, "brightness": 100, "slots": {}}
+        #    "slots": {str(slot): {"vis": "off|lit|breath", "rgb": [r, g, b]}},
+        #    "applied": bool}
+        # G19-FIX3: "applied" records that the layout has been PERSISTED to
+        # the board's flash at least once (the Apply chain ends in a
+        # profile-update). Exiting per-key after a persisted apply REQUIRES
+        # an explicit all-zero erase — the flag rides the store so a
+        # restart/crash with a stuck overlay still erases on the next Apply.
+        self.per_key: dict = {
+            "enabled": False,
+            "brightness": 100,
+            "slots": {},
+            "applied": False,
+        }
         self.profile = 1
         self.layer = 1
         if self.hidraw is not None:
@@ -846,16 +857,24 @@ class StockGmmkProBackend(BaseBackend):
             layout[base + 2 : base + 5] = self._per_key_rgb(entry["rgb"])
         return bytes(layout)
 
-    def _prepare_per_key_layout_buffer(self, report: bytearray, page: int) -> None:
+    def _prepare_per_key_layout_buffer(
+        self, report: bytearray, page: int, layout: bytes | None = None
+    ) -> None:
         """Vendor per-key layout report (cmd 0x06, standalone 264-byte
         buffer): [2]=profile+1-style selectors identical to the cmd-0x03
         writer, [4]=KeyNumber 83, [5]=page 0..2, [6]=global brightness
-        0..20, [8..207]=the 200-byte page slice of the 600-byte layout."""
+        0..20, [8..207]=the 200-byte page slice of the 600-byte layout.
+
+        G19-FIX3: ``layout`` overrides the stored-slots buffer — the erase
+        reuses this preparer with an all-zero 600-byte layout (header bytes,
+        including the brightness at [6], stay exactly as the normal builder
+        emits them)."""
         if not 0 <= int(page) < PER_KEY_PAGE_COUNT:
             raise BackendError(
                 f"Per-key layout page must be 0-{PER_KEY_PAGE_COUNT - 1}, got {page!r}."
             )
-        layout = self.build_per_key_layout()
+        if layout is None:
+            layout = self.build_per_key_layout()
         report[0] = self.REPORT_ID
         report[1] = CMD_SET_LAYOUT
         report[2] = self.profile
@@ -880,6 +899,28 @@ class StockGmmkProBackend(BaseBackend):
         return (
             f"Sent the per-key layout in {PER_KEY_PAGE_COUNT} pages "
             "(colors come from this computer's store — the board has no readback)."
+        )
+
+    def erase_per_key_layout(self) -> str:
+        """G19-FIX3: exit a PERSISTED per-key overlay with 3 ALL-ZERO pages.
+
+        Proven on the physical board (G19_FIX3_PLAN.md): once a layout apply
+        has been persisted by the profile-update report, the overlay keeps
+        painted keys colored — the effect report (0x02) has no per-key exit
+        flag. The ONLY exit is an explicit erase: 3 pages, cmd 0x06,
+        KeyNumber 83, page selectors 0/1/2, every slot byte zero. Stored
+        slots are IGNORED (the erase is all-zero even when the store still
+        holds colors); the brightness header byte [6] rides the same mapping
+        as the normal builder. Same 256-byte wire rule as apply (G19-FIX2).
+        """
+        blank_layout = bytes(PER_KEY_LAYOUT_BYTES)
+        for page in range(PER_KEY_PAGE_COUNT):
+            page_report = bytearray(PER_KEY_LAYOUT_REPORT_LENGTH)
+            self._prepare_per_key_layout_buffer(page_report, page, layout=blank_layout)
+            self._send_feature_report(page_report, wire_length=G19_WIRE_LENGTH)
+        return (
+            f"Erased the per-key layout in {PER_KEY_PAGE_COUNT} all-zero pages "
+            "(the persisted overlay only exits on an explicit erase)."
         )
 
     def device_indication(self) -> str:
@@ -1355,8 +1396,20 @@ class StockGmmkProBackend(BaseBackend):
         # per-key layout pages (0x06 x3) -> profile-update. The pages join
         # the flow ONLY while per-key mode is enabled, so the default
         # (disabled) wire stays byte-identical to HEAD.
+        # G19-FIX3: once the layout has been PERSISTED (profile-update after
+        # pages), disabling per-key MUST send an explicit all-zero erase —
+        # the flash overlay keeps painted keys colored and the effect report
+        # has no per-key exit flag (operator-proven on 320f:5092 FW 0104).
+        # "applied" rides the store (settings snapshot), so the erase also
+        # happens after a restart/crash with a stuck overlay. Never enabled
+        # AND never applied: NO pages — the never-used default wire stays
+        # byte-identical to HEAD.
         if self.per_key["enabled"]:
             self.apply_per_key_layout()
+            self.per_key["applied"] = True
+        elif self.per_key.get("applied", False):
+            self.erase_per_key_layout()
+            self.per_key["applied"] = False
         self._send_feature_report(profile_update)
 
     def _prepare_properties_buffer(self, report: bytearray) -> None:

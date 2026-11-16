@@ -1219,6 +1219,10 @@ class OpenGloriousCoreWebController:
         brightness = per_key.get("brightness")
         return {
             "enabled": bool(per_key.get("enabled")),
+            # G19-FIX3: the persisted-apply flag rides the mirror so it
+            # round-trips through the store (and export/import). Records
+            # without it — old stores/imports — default False.
+            "applied": bool(per_key.get("applied", False)),
             "brightness": int(brightness) if isinstance(brightness, int) else 100,
             "slots": slots_out,
         }

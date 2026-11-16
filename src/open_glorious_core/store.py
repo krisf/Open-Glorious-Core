@@ -78,7 +78,10 @@ SETTING_KEYS = frozenset(
 # G19A per-key vis literals (slot byte +0: 0x00 / 0xFF / 0xFE on the wire).
 PER_KEY_VIS = frozenset({"off", "lit", "breath"})
 PER_KEY_SLOTS = 120
-PER_KEY_BLOCK_KEYS = frozenset({"enabled", "brightness", "slots"})
+# G19-FIX3: "applied" records a PERSISTED per-key apply (the board only
+# exits that overlay on an explicit all-zero erase). Absent on old records —
+# consumers default it False.
+PER_KEY_BLOCK_KEYS = frozenset({"enabled", "brightness", "slots", "applied"})
 
 # G19B macros (G19B_PLAN.md — Glorious CORE 2.1.22 ground truth). Stored per
 # profile/layer in the SAME settings block as the G19A keys, chosen because it
@@ -163,8 +166,11 @@ def validate_per_key(value: Any) -> dict[str, Any]:
 
     Shape: {"enabled": bool, "brightness": 0..100,
             "slots": {<slot 0..119>: {"vis": "off|lit|breath",
-                                      "rgb": [r, g, b]}}}
+                                      "rgb": [r, g, b]}},
+            "applied": bool}          # G19-FIX3, optional (defaults False)
     Slots keys must be digit strings in 0..119 (same convention as keymap).
+    "applied" is OPTIONAL: old records without it load unchanged — readers
+    use ``.get("applied", False)``, mirroring how the backend defaults it.
     """
     if not isinstance(value, dict):
         raise StoreError("per_key must be an object")
@@ -177,6 +183,11 @@ def validate_per_key(value: Any) -> dict[str, Any]:
         if not isinstance(enabled, bool):
             raise StoreError(f"per_key enabled must be a boolean, got {enabled!r}")
         out["enabled"] = enabled
+    if "applied" in value:
+        applied = value["applied"]
+        if not isinstance(applied, bool):
+            raise StoreError(f"per_key applied must be a boolean, got {applied!r}")
+        out["applied"] = applied
     if "brightness" in value:
         out["brightness"] = _plain_int(value["brightness"], 0, 100, "per_key brightness")
     if "slots" in value:
